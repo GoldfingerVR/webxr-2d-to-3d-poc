@@ -1,162 +1,176 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>WebXR Flat Screen (VR)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>WebXR 2D→3D POC (Video Plane)</title>
   <style>
-    html,body{margin:0;height:100%;background:#000;overflow:hidden}
-    #ui{position:fixed;left:0;right:0;top:0;padding:10px;display:flex;gap:8px;align-items:center;z-index:5}
-    #play{padding:8px 12px;border:0;border-radius:8px;background:#444;color:#fff}
-    #enter{margin-left:auto;padding:8px 12px;border:0;border-radius:8px;background:#1e90ff;color:#fff}
-    #status{color:#bbb;font:12px/1.2 system-ui,sans-serif}
-    canvas{display:block}
+    html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+    #ui {
+      position:fixed; z-index:3; left:16px; top:16px; display:flex; gap:8px; align-items:center;
+      font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:#ddd;
+    }
+    button { background:#3b3b3b; color:#fff; border:none; padding:10px 14px; border-radius:10px; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    #status { opacity:.8 }
+    /* keep the HTML <video> off-screen – we only use it as a texture */
+    video { position:fixed; left:-9999px; top:-9999px; width:1px; height:1px; }
   </style>
 </head>
 <body>
   <div id="ui">
-    <button id="play" type="button">Load & Play</button>
-    <div id="status">idle</div>
-    <button id="enter" type="button">Enter VR</button>
+    <button id="loadBtn">Load & Play</button>
+    <span id="status">idle</span>
   </div>
 
+  <!-- Your stream: HLS (.m3u8) works in Oculus Browser; MP4 works everywhere -->
+  <video id="vid" playsinline crossorigin="anonymous" muted></video>
+
+  <!-- three.js + helpers -->
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+    import { VRButton } from 'https://unpkg.com/three@0.160.0/examples/jsm/webxr/VRButton.js';
 
-    // HLS loader
-    const HlsLib = await import('https://cdn.jsdelivr.net/npm/hls.js@latest');
+    // ====== CONFIG ======
+    const STREAM_URL =
+      // MP4 fallback (public demo)
+      'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
+      // If you have a direct MP4, swap it in (often starts faster in desktop browsers)
+      // 'https://d2zihajmogu5jn.cloudfront.net/bipbop-adv/master.m3u8';
 
-    // ---------- CONFIG ----------
-    const STREAM_URL = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'; // keep Mux test stream
-
-    // ---------- THREE SETUP ----------
-    const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false }); // alpha:false -> opaque (no passthrough)
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    renderer.setSize(innerWidth, innerHeight);
-    renderer.xr.enabled = true; // we will set the session manually
-    document.body.appendChild(renderer.domElement);
-
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x000000); // hard black background
-
-    const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.01, 100);
-    camera.position.set(0, 1.6, 0);
-
-    // Add a big inverted sphere so there is NO transparency to real world
-    const skyGeo = new THREE.SphereGeometry(20, 32, 16);
-    skyGeo.scale(-1, 1, 1);
-    const skyMat = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide });
-    scene.add(new THREE.Mesh(skyGeo, skyMat));
-
-    // floor reference (dark)
-    const floor = new THREE.Mesh(
-      new THREE.CircleGeometry(3.5, 64),
-      new THREE.MeshBasicMaterial({ color: 0x101010 })
-    );
-    floor.rotation.x = -Math.PI/2;
-    floor.position.y = 0;
-    scene.add(floor);
-
-    // ---------- VIDEO + TEXTURE ----------
-    const video = document.createElement('video');
-    video.playsInline = true;
-    video.muted = true;
-    video.crossOrigin = 'anonymous';
-    video.controls = false;
-
-    let hls;
-
-    async function loadAndPlay() {
-      statusEl.textContent = 'loading...';
-      try {
-        if (HlsLib.default.isSupported()) {
-          hls = new HlsLib.default({ lowLatencyMode:true });
-          hls.loadSource(STREAM_URL);
-          hls.attachMedia(video);
-          hls.on(HlsLib.default.Events.MANIFEST_PARSED, () => {
-            video.play().then(()=> statusEl.textContent = 'playing').catch(err=>{
-              statusEl.textContent = 'tap Play in headset';
-              console.warn(err);
-            });
-          });
-          hls.on(HlsLib.default.Events.ERROR, (evt, data) => {
-            console.warn('HLS error', data);
-            statusEl.textContent = `HLS error: ${data?.details || data?.type || 'unknown'}`;
-          });
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-          video.src = STREAM_URL;
-          await video.play();
-          statusEl.textContent = 'playing';
-        } else {
-          statusEl.textContent = 'HLS unsupported';
-          alert('HLS not supported in this browser.');
-          return;
-        }
-      } catch (e) {
-        console.error(e);
-        statusEl.textContent = 'playback blocked';
-      }
-    }
-
-    const tex = new THREE.VideoTexture(video);
-    tex.colorSpace = THREE.SRGBColorSpace;
-
-    // Simple flat 16:9 screen in front of the user
-    const screenHeight = 1.2;                 // meters
-    const screenWidth  = screenHeight * (16/9);
-    const plane = new THREE.Mesh(
-      new THREE.PlaneGeometry(screenWidth, screenHeight),
-      new THREE.MeshBasicMaterial({ map: tex, toneMapped:false })
-    );
-    plane.position.set(0, 1.5, -3.0);         // centered at eye height, 3m away
-    scene.add(plane);
-
-    // ---------- RENDER LOOP ----------
-    function onResize() {
-      renderer.setSize(innerWidth, innerHeight);
-      camera.aspect = innerWidth / innerHeight;
-      camera.updateProjectionMatrix();
-    }
-    addEventListener('resize', onResize);
-
-    renderer.setAnimationLoop(() => {
-      renderer.render(scene, camera);
-    });
-
-    // ---------- UI ----------
-    const playBtn = document.getElementById('play');
-    const enterBtn = document.getElementById('enter');
+    // ====== ELEMENTS ======
+    const video  = document.getElementById('vid');
+    const loadBtn = document.getElementById('loadBtn');
     const statusEl = document.getElementById('status');
 
-    playBtn.addEventListener('pointerdown', loadAndPlay);
-    playBtn.addEventListener('click', loadAndPlay);
-
-    // Force an immersive-VR session explicitly (to avoid AR/passthrough)
-    let xrSession = null;
-    async function enterVR() {
-      if (!navigator.xr) {
-        alert('WebXR not available');
-        return;
+    // If it’s HLS and the browser doesn’t do native HLS, use hls.js dynamically.
+    async function attachSource(url) {
+      const isHls = /\.m3u8(\?|$)/i.test(url);
+      const supportsNativeHls = video.canPlayType('application/vnd.apple.mpegurl') !== '';
+      if (isHls && !supportsNativeHls) {
+        // lazy-load hls.js
+        await import('https://cdn.jsdelivr.net/npm/hls.js@latest');
+        if (window.Hls && window.Hls.isSupported()) {
+          const hls = new window.Hls({ maxBufferLength: 5, liveBackBufferLength: 5 });
+          hls.loadSource(url);
+          hls.attachMedia(video);
+          return;
+        }
       }
-      try {
-        xrSession = await navigator.xr.requestSession('immersive-vr', {
-          requiredFeatures: ['local-floor'],
-          optionalFeatures: []
-        });
-        renderer.xr.setSession(xrSession);
-        statusEl.textContent = 'VR session started';
-      } catch (e) {
-        console.error(e);
-        statusEl.textContent = 'VR request failed';
-      }
+      // Native path (or MP4)
+      video.src = url;
     }
-    enterBtn.addEventListener('pointerdown', enterVR);
-    enterBtn.addEventListener('click', enterVR);
 
-    // QoL: resume if tab regains focus
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && video.paused) video.play().catch(()=>{});
+    // ====== THREE / WEBXR SCENE ======
+    let renderer, scene, camera, videoTex, plane, clock;
+
+    initThree();
+    setupPlane();
+    setupXRButton();
+    tick();
+
+    function initThree() {
+      renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x000000);
+
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
+      camera.position.set(0, 1.6, 0); // eye height-ish
+
+      clock = new THREE.Clock();
+
+      // tiny ambient so "darkness" never happens
+      const amb = new THREE.AmbientLight(0xffffff, 0.6);
+      scene.add(amb);
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    }
+
+    function setupPlane() {
+      // Start with a neutral 16:9 plane, adjust after metadata loads.
+      const geom = new THREE.PlaneGeometry(2.8, 1.575); // ~2.8m wide @ 16:9
+      const mat  = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+      plane = new THREE.Mesh(geom, mat);
+      plane.position.set(0, 1.6, -2); // 2 meters in front of user’s eyes
+      scene.add(plane);
+
+      // Prepare video texture but attach only after playback starts
+      videoTex = new THREE.VideoTexture(video);
+      videoTex.encoding = THREE.sRGBEncoding;
+      videoTex.colorSpace = THREE.SRGBColorSpace ?? THREE.SRGBColorSpace; // forward compat
+      videoTex.minFilter = THREE.LinearFilter;
+      videoTex.magFilter = THREE.LinearFilter;
+      videoTex.generateMipmaps = false;
+      videoTex.needsUpdate = false; // will flip true once playing
+
+      // set once attached
+      plane.material.map = null;
+      plane.material.needsUpdate = true;
+
+      // When video metadata is known, resize plane for correct aspect
+      video.addEventListener('loadedmetadata', () => {
+        const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+        const aspect = vw / Math.max(1, vh);
+        const height = 2.8 / aspect; // keep width 2.8m
+        plane.geometry.dispose();
+        plane.geometry = new THREE.PlaneGeometry(2.8, height);
+      });
+    }
+
+    function setupXRButton() {
+      document.body.appendChild(VRButton.createButton(renderer));
+      // request hand-tracking optionally (we’ll wire visuals later)
+      renderer.xr.setSessionInit({
+        optionalFeatures: ['local-floor', 'hand-tracking']
+      });
+    }
+
+    // ====== PLAYBACK FLOW ======
+    loadBtn.addEventListener('click', async () => {
+      loadBtn.disabled = true;
+      status('loading…');
+      try {
+        await attachSource(STREAM_URL);
+        // user gesture already happened (click), try to play
+        await video.play();
+        // unmute (Oculus usually allows after gesture)
+        video.muted = false;
+
+        // bind texture
+        plane.material.map = videoTex;
+        plane.material.needsUpdate = true;
+        videoTex.needsUpdate = true;
+
+        status('playing');
+      } catch (e) {
+        status('playback blocked – tap button again if needed');
+        console.error(e);
+        loadBtn.disabled = false;
+      }
     });
+
+    // ====== RENDER LOOP ======
+    function tick() {
+      renderer.setAnimationLoop(() => {
+        // keep texture fresh
+        if (!video.paused && !video.ended) {
+          videoTex.needsUpdate = true;
+        }
+        renderer.render(scene, camera);
+      });
+    }
+
+    function status(msg) { statusEl.textContent = msg; }
   </script>
 </body>
 </html>
