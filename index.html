@@ -1,111 +1,150 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>WebXR 2D Stream Test</title>
+  <title>WebXR VR Theater (HLS)</title>
   <style>
-    html, body {
-      height: 100%;
-      margin: 0;
-      background: #000;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-      -webkit-user-select: none;
-      user-select: none;
-      touch-action: manipulation;
-    }
-    video {
-      max-width: 100vw;
-      max-height: 100vh;
-      background: #000;
-      outline: none;
-    }
-    /* Always-on-top Start button so Oculus taps don't get eaten by the video */
-    #start {
-      position: fixed;
-      left: 50%;
-      bottom: 24px;
-      transform: translateX(-50%);
-      z-index: 99999;
-      background: #1e90ff;
-      color: #fff;
-      border: 0;
-      padding: 12px 18px;
-      border-radius: 10px;
-      font-size: 16px;
-      line-height: 1;
-      cursor: pointer;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.35);
-    }
+    html,body { margin:0; height:100%; background:#000; overflow:hidden; }
+    #ui { position:fixed; left:0; right:0; top:0; padding:10px; display:flex; gap:8px; align-items:center; z-index:5; }
+    #enter { margin-left:auto; padding:8px 12px; border:0; border-radius:8px; background:#1e90ff; color:#fff; }
+    #start { padding:8px 12px; border:0; border-radius:8px; background:#444; color:#fff; }
+    #status { color:#bbb; font:12px/1.2 system-ui, sans-serif; }
+    canvas { display:block; }
   </style>
 </head>
 <body>
+  <div id="ui">
+    <button id="start" type="button">Load & Play</button>
+    <div id="status">idle</div>
+    <button id="enter" type="button">Enter VR</button>
+  </div>
 
-  <video id="video" playsinline webkit-playsinline></video>
-  <button id="start" type="button">Tap to start</button>
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+    import { XRButton } from 'https://unpkg.com/three@0.160.0/examples/jsm/webxr/XRButton.js';
 
-  <!-- hls.js -->
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <script>
-    const video = document.getElementById('video');
-    const btn   = document.getElementById('start');
+    // HLS loader (hls.js) via dynamic import so it works in-module
+    const HlsLib = await import('https://cdn.jsdelivr.net/npm/hls.js@latest');
 
-    // >>> Replace this with your HLS .m3u8 URL
-    const STREAM_URL = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
-    // <<<
+    // ----- CONFIG -----
+    const STREAM_URL = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'; // keep using this Mux URL
 
-    function loadAndPlay() {
-      btn.style.display = 'none';
+    // ----- THREE SETUP -----
+    const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
 
-      // Remove controls until playback starts (controls overlays can block clicks in VR)
-      video.removeAttribute('controls');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
 
-      if (window.Hls && Hls.isSupported()) {
-        const hls = new Hls({ lowLatencyMode: true });
-        hls.loadSource(STREAM_URL);
-        hls.attachMedia(video);
+    const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.01, 100);
+    camera.position.set(0, 1.6, 0);
 
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(err => {
-            console.warn('Autoplay blocked, showing button again:', err);
-            btn.style.display = 'block';
+    const light = new THREE.HemisphereLight(0xffffff, 0x222233, 0.6);
+    scene.add(light);
+
+    // floor reference
+    const floor = new THREE.Mesh(
+      new THREE.CircleGeometry(3.5, 64),
+      new THREE.MeshBasicMaterial({ color: 0x101010 })
+    );
+    floor.rotation.x = -Math.PI/2;
+    floor.position.y = 0;
+    scene.add(floor);
+
+    // ----- VIDEO ELEMENT + HLS -----
+    const video = document.createElement('video');
+    video.playsInline = true;
+    video.muted = true; // allow autoplay after gesture
+    video.crossOrigin = 'anonymous'; // safe for public test streams
+    video.controls = false;
+
+    let hls;
+
+    async function loadAndPlay() {
+      statusEl.textContent = 'loading...';
+      try {
+        if (HlsLib.default.isSupported()) {
+          hls = new HlsLib.default({ lowLatencyMode:true });
+          hls.loadSource(STREAM_URL);
+          hls.attachMedia(video);
+          hls.on(HlsLib.default.Events.MANIFEST_PARSED, () => {
+            video.play().then(()=> statusEl.textContent = 'playing').catch(err => {
+              statusEl.textContent = 'tap Play in headset';
+              console.warn(err);
+            });
           });
-        });
-
-        hls.on(Hls.Events.ERROR, (event, data) => {
-          console.error('HLS error:', data);
-        });
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari path
-        video.src = STREAM_URL;
-        video.play().catch(err => {
-          console.warn('Autoplay blocked (Safari):', err);
-          btn.style.display = 'block';
-        });
-      } else {
-        alert('This browser does not support HLS playback.');
-        btn.style.display = 'block';
-        return;
+          hls.on(HlsLib.default.Events.ERROR, (evt, data) => {
+            console.warn('HLS error', data);
+            statusEl.textContent = `HLS error: ${data?.details || data?.type || 'unknown'}`;
+          });
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = STREAM_URL;
+          await video.play();
+          statusEl.textContent = 'playing';
+        } else {
+          statusEl.textContent = 'HLS unsupported';
+          alert('HLS not supported in this browser.');
+          return;
+        }
+      } catch (e) {
+        console.error(e);
+        statusEl.textContent = 'playback blocked';
       }
-
-      // Add controls after playback begins
-      video.addEventListener('playing', () => {
-        video.setAttribute('controls', '');
-      }, { once: true });
     }
 
-    // Pointer is more reliable in Oculus; keep click as fallback
-    btn.addEventListener('pointerdown', loadAndPlay, { passive: true });
-    btn.addEventListener('click', loadAndPlay, { passive: true });
+    // Create Three.js texture from <video>
+    const texture = new THREE.VideoTexture(video);
+    texture.colorSpace = THREE.SRGBColorSpace;
 
-    // Resume if page regains focus
+    // Curved screen (inward-facing cylinder segment)
+    const radius = 2.6;            // distance/curvature
+    const height = 1.45;            // screen height in meters
+    const arc = Math.PI / 1.8;      // curvature (smaller = less curved)
+    const segs = 128;
+
+    const geo = new THREE.CylinderGeometry(radius, radius, height, segs, 1, true, -arc/2, arc);
+    geo.scale(-1, 1, 1); // face inward
+
+    const mat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.BackSide, toneMapped:false });
+    const screen = new THREE.Mesh(geo, mat);
+    screen.position.set(0, 1.6, -0.02);
+    scene.add(screen);
+
+    // ----- RENDER LOOP -----
+    function onResize() {
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+    }
+    addEventListener('resize', onResize);
+
+    renderer.setAnimationLoop(() => {
+      renderer.render(scene, camera);
+    });
+
+    // ----- UI -----
+    const startBtn = document.getElementById('start');
+    const enterBtn = document.getElementById('enter');
+    const statusEl = document.getElementById('status');
+
+    startBtn.addEventListener('pointerdown', loadAndPlay);
+    startBtn.addEventListener('click', loadAndPlay);
+
+    // Native WebXR button (hidden) to satisfy permissions
+    const xrBtn = XRButton.createButton(renderer, { requiredFeatures: ['local-floor'] });
+    xrBtn.style.display = 'none';
+    document.body.appendChild(xrBtn);
+
+    enterBtn.addEventListener('pointerdown', () => renderer.xr.isPresenting ? null : xrBtn.click());
+    enterBtn.addEventListener('click', () => renderer.xr.isPresenting ? null : xrBtn.click());
+
+    // Quality-of-life: if tab regains focus, try to resume
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && video.paused && btn.style.display === 'none') {
-        video.play().catch(()=>{});
-      }
+      if (!document.hidden && video.paused) video.play().catch(()=>{});
     });
   </script>
 </body>
