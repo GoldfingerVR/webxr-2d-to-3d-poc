@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>WebXR Video POC — v0.8</title>
+  <title>WebXR 2D→Fake-3D POC — v0.9</title>
   <style>
     html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
     #hud{position:fixed;z-index:3;left:16px;top:16px;display:flex;gap:8px;align-items:center}
@@ -13,7 +13,7 @@
     #status{opacity:.85}
     #overlay{
       position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;
-      align-items:center;justify-content:center;z-index:4;background:rgba(0,0,0,.5)
+      align-items:center;justify-content:center;z-index:4;background:rgba(0,0,0,.55)
     }
     .cta{
       background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;
@@ -27,7 +27,7 @@
 <body>
   <!-- HUD (always visible) -->
   <div id="hud">
-    <span class="pill">Build v0.8</span>
+    <span class="pill">Build v0.9</span>
     <span id="enterVR" class="pill btn-pill" aria-disabled="true">Enter VR</span>
     <span id="status" class="pill">idle</span>
   </div>
@@ -44,146 +44,223 @@
   <div id="diag"></div>
 
   <script type="module">
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.module.js';
-import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.157.0/examples/jsm/webxr/VRButton.js';
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
 
-let scene, camera, renderer, video, videoTex, plane;
+    // -------- Config (use MP4 to avoid HLS issues for smoke test) --------
+    // Replace with your own MP4 when ready.
+    const STREAM_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
 
-init();
-function init() {
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000000);
+    // -------- DOM refs --------
+    const video   = document.getElementById('vid');
+    const playBtn = document.getElementById('playBtn');
+    const overlay = document.getElementById('overlay');
+    const statusE = document.getElementById('status');
+    const enterVR = document.getElementById('enterVR');
+    const diag    = document.getElementById('diag');
 
-  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
-  camera.position.z = 3;
+    // -------- Three / XR --------
+    let renderer, scene, camera, plane, videoTex;
+    let stereo = { left:null, right:null }; // per-eye meshes
 
-  renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.xr.enabled = true;
-  document.body.appendChild(renderer.domElement);
+    initThree();
+    setupPlane();
+    animate();
+    wireUI();
+    probeXR(); // initial probe (may be false until after gesture)
 
-  document.body.appendChild(VRButton.createButton(renderer));
+    function wireUI(){
+      const tryPlay = () => startPlayback().catch(()=>{});
+      ['pointerdown','click','touchstart','keydown'].forEach(ev=>{
+        overlay.addEventListener(ev, tryPlay, { passive:true });
+      });
+      playBtn.addEventListener('click', tryPlay);
 
-  // version label
-  const div = document.createElement('div');
-  div.textContent = 'VR POC v0.9';
-  div.style.position = 'absolute';
-  div.style.top = '10px';
-  div.style.left = '10px';
-  div.style.color = 'white';
-  div.style.fontFamily = 'monospace';
-  div.style.zIndex = '999';
-  document.body.appendChild(div);
+      // Persistent Enter VR pill
+      enterVR.addEventListener('click', async ()=>{
+        if (enterVR.getAttribute('aria-disabled') === 'true') {
+          log('Enter VR pressed but XR unsupported (still trying)…');
+        }
+        await startXR();
+      });
+    }
 
-  // play/autoplay button
-  const playBtn = document.createElement('button');
-  playBtn.textContent = 'Enable Autoplay & Play Video';
-  playBtn.style.position = 'absolute';
-  playBtn.style.bottom = '20px';
-  playBtn.style.left = '50%';
-  playBtn.style.transform = 'translateX(-50%)';
-  playBtn.style.padding = '10px 20px';
-  playBtn.style.fontSize = '16px';
-  document.body.appendChild(playBtn);
+    async function startPlayback(){
+      overlay.style.display = 'none';
+      status('loading…');
+      try{
+        video.src = STREAM_URL;
+        await video.play();            // requires user gesture
+        video.muted = false;           // safe to unmute after gesture
+        bindVideoTexture();
+        setupStereoParallax();         // fake depth using per-eye UV shifts
+        status('playing');
+        await probeXR(true);           // re-check after gesture; enable Enter VR if supported
+      }catch(e){
+        status('playback blocked');
+        overlay.style.display = 'flex';
+        log('play() error: ' + (e?.message || e));
+        throw e;
+      }
+    }
 
-  playBtn.addEventListener('click', () => {
-    playBtn.remove();
-    setupVideo();
-  });
+    function bindVideoTexture(){
+      if (!videoTex) {
+        videoTex = new THREE.VideoTexture(video);
+        videoTex.colorSpace = THREE.SRGBColorSpace;
+        videoTex.minFilter = THREE.LinearFilter;
+        videoTex.magFilter = THREE.LinearFilter;
+        videoTex.generateMipmaps = false;
+      }
+      plane.material.map = videoTex;
+      plane.material.needsUpdate = true;
 
-  window.addEventListener('resize', onWindowResize);
-}
+      // keep plane & stereo sizes in sync with real aspect
+      video.addEventListener('loadedmetadata', ()=>{
+        const w = video.videoWidth || 16, h = video.videoHeight || 9;
+        const aspect = w / Math.max(1, h);
+        const width = 2.8, height = width / aspect;
 
-function setupVideo() {
-  video = document.createElement('video');
-  video.src = 'https://stream.mux.com/KH02NwH01GZ28mI02.m3u8'; // change to your stream
-  video.crossOrigin = 'anonymous';
-  video.loop = true;
-  video.muted = true;
-  video.autoplay = true;
-  video.playsInline = true;
-  video.play();
+        plane.geometry.dispose();
+        plane.geometry = new THREE.PlaneGeometry(width, height);
 
-  videoTex = new THREE.VideoTexture(video);
-  videoTex.minFilter = THREE.LinearFilter;
-  videoTex.magFilter = THREE.LinearFilter;
-  videoTex.format = THREE.RGBFormat;
+        if (stereo.left && stereo.right) {
+          [stereo.left, stereo.right].forEach(mesh=>{
+            mesh.geometry.dispose();
+            mesh.geometry = new THREE.PlaneGeometry(width, height);
+            applyShift(mesh);
+          });
+        }
+      }, { once:true });
+    }
 
-  setupPlane();
-  bindVideoTexture();
-  setupStereoParallax();
-}
+    function setupPlane(){
+      const geom = new THREE.PlaneGeometry(2.8, 1.575); // temp 16:9, corrected on metadata
+      const mat  = new THREE.MeshBasicMaterial({ color:0xffffff });
+      plane = new THREE.Mesh(geom, mat);
+      plane.position.set(0, 1.6, -2.0);
+      scene.add(plane);
+    }
 
-function setupPlane() {
-  const geometry = new THREE.PlaneGeometry(2.8, 1.6);
-  const material = new THREE.MeshBasicMaterial({ map: videoTex });
-  plane = new THREE.Mesh(geometry, material);
-  scene.add(plane);
-}
+    // --- Fake stereo via per-eye UV offset (simple parallax) ---
+    function setupStereoParallax(){
+      // hide mono plane
+      plane.visible = false;
 
-function bindVideoTexture() {
-  video.addEventListener('loadedmetadata', () => {
-    const aspect = video.videoWidth / video.videoHeight;
-    plane.geometry.dispose();
-    plane.geometry = new THREE.PlaneGeometry(2.8, 2.8 / aspect);
-  });
-}
+      const makeMat = (shift) => {
+        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, map: videoTex });
+        m.map.wrapS = THREE.ClampToEdgeWrapping;
+        m.map.wrapT = THREE.ClampToEdgeWrapping;
+        m.userData.shift = shift; // store for reapply
+        return m;
+      };
 
-// --- NEW: stereo parallax fake 3D ---
-function setupStereoParallax(){
-  plane.visible = false;
+      const baseGeom = plane.geometry.clone();
 
-  const makeMat = (shift) => {
-    const m = new THREE.MeshBasicMaterial({ map: videoTex });
-    m.map.wrapS = THREE.ClampToEdgeWrapping;
-    m.map.wrapT = THREE.ClampToEdgeWrapping;
-    m.map.needsUpdate = true;
-    m.userData.shift = shift;
-    return m;
-  };
+      // LEFT eye only
+      stereo.left = new THREE.Mesh(baseGeom.clone(), makeMat(-0.006)); // tune magnitude as needed
+      stereo.left.position.copy(plane.position);
+      stereo.left.layers.set(1);
+      scene.add(stereo.left);
 
-  const geom = plane.geometry.clone();
+      // RIGHT eye only
+      stereo.right = new THREE.Mesh(baseGeom.clone(), makeMat(+0.006));
+      stereo.right.position.copy(plane.position);
+      stereo.right.layers.set(2);
+      scene.add(stereo.right);
 
-  const left = new THREE.Mesh(geom.clone(), makeMat(-0.005));
-  left.position.copy(plane.position);
-  left.layers.set(1);
-  scene.add(left);
+      applyShift(stereo.left);
+      applyShift(stereo.right);
+    }
 
-  const right = new THREE.Mesh(geom.clone(), makeMat(+0.005));
-  right.position.copy(plane.position);
-  right.layers.set(2);
-  scene.add(right);
+    function applyShift(mesh){
+      const s = mesh.material.userData.shift || 0;
+      // Offset around texture center to avoid sampling outside edges
+      mesh.material.map.center.set(0.5, 0.5);
+      mesh.material.map.offset.set(0.5 + s, 0.5);
+      mesh.material.needsUpdate = true;
+    }
+    // -----------------------------------------------------------
 
-  const applyShift = (mesh) => {
-    const s = mesh.material.userData.shift || 0;
-    mesh.material.map.offset.set(0.5 + s, 0.5);
-    mesh.material.map.center.set(0.5, 0.5);
-    mesh.material.needsUpdate = true;
-  };
-  applyShift(left);
-  applyShift(right);
+    async function startXR(){
+      if (!navigator.xr) { status('WebXR not available'); log('navigator.xr is undefined'); return; }
+      try{
+        const session = await navigator.xr.requestSession('immersive-vr', {
+          requiredFeatures: ['local-floor'],
+          optionalFeatures: ['hand-tracking']
+        });
+        renderer.xr.setSession(session);
+        status('VR started');
+        session.addEventListener('end', ()=>{
+          status('VR ended');
+          if (video.paused) video.play().catch(()=>{
+            overlay.style.display='flex';
+          });
+        });
+      }catch(e){
+        status('VR failed');
+        log('requestSession error: ' + (e?.message || e));
+      }
+    }
 
-  video.addEventListener('loadedmetadata', ()=>{
-    const aspect = video.videoWidth / Math.max(1, video.videoHeight);
-    const width = 2.8, height = width / aspect;
-    [left, right].forEach(mesh=>{
-      mesh.geometry.dispose();
-      mesh.geometry = new THREE.PlaneGeometry(width, height);
-      applyShift(mesh);
-    });
-  });
-}
-// ------------------------------------
+    async function probeXR(afterGesture=false){
+      const httpsOK = (location.protocol === 'https:') || (location.hostname === 'localhost');
+      const xrOK = !!navigator.xr;
+      let supported = false;
+      try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; }
+      catch(e) { log('isSessionSupported threw: ' + e); }
 
-function onWindowResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-}
+      diag.textContent =
+        `Secure (https or localhost): ${httpsOK}\n`+
+        `navigator.xr present: ${xrOK}\n`+
+        `'immersive-vr' supported: ${supported}`+
+        (afterGesture ? `\n(rechecked after user gesture)` : '');
 
-renderer.setAnimationLoop(() => {
-  renderer.render(scene, camera);
-});
-</script>
+      enterVR.setAttribute('aria-disabled', supported ? 'false' : 'true');
+    }
+
+    function status(msg){ statusE.textContent = msg; }
+    function log(msg){ diag.textContent += (diag.textContent ? '\n' : '') + msg; }
+
+    // ---------- Three boilerplate ----------
+    function initThree(){
+      renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x000000);
+
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
+      camera.position.set(0, 1.6, 0);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+
+      // simple floor so you’re never in total black
+      const floor = new THREE.Mesh(
+        new THREE.CircleGeometry(3.5, 64),
+        new THREE.MeshBasicMaterial({ color:0x101010 })
+      );
+      floor.rotation.x = -Math.PI/2;
+      floor.position.y = 0;
+      scene.add(floor);
+
+      window.addEventListener('resize', ()=>{
+        camera.aspect = window.innerWidth/window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    }
+
+    function animate(){
+      renderer.setAnimationLoop(()=>{
+        if (videoTex && !video.paused && !video.ended) {
+          videoTex.needsUpdate = true;
+        }
+        renderer.render(scene, camera);
+      });
+    }
+  </script>
 </body>
 </html>
