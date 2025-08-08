@@ -2,270 +2,228 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>WebXR 2D-Fake-3D POC — v0.10</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <title>WebXR 2D→3D (Light ML • ONNX)</title>
   <style>
-    html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-    #hud{position:fixed;z-index:3;left:16px;top:16px;display:flex;gap:8px;align-items:center}
-    .pill{background:#303030;color:#e0e0e0;border-radius:999px;padding:6px 10px;font-size:12px;border:1px solid #444}
-    .btn-pill{cursor:pointer;user-select:none}
-    .btn-pill[aria-disabled="true"]{opacity:.45;cursor:not-allowed}
-    #status{opacity:.85}
-    #overlay{
-      position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;
-      align-items:center;justify-content:center;z-index:4;background:rgba(0,0,0,.55)
-    }
-    .cta{
-      background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;
-      padding:14px 22px;border-radius:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)
-    }
-    #diag{position:fixed;left:12px;bottom:12px;color:#aaa;font-size:12px;white-space:pre-line;z-index:3;max-width:92vw}
+    html,body{height:100%;margin:0;background:#000;color:#ccc;font-family:system-ui,Arial,sans-serif}
+    #hud{position:fixed;left:12px;top:12px;display:flex;gap:8px;z-index:3}
+    .pill{background:#2b2b2b;border:1px solid #3a3a3a;border-radius:999px;color:#eee;padding:8px 12px;font-size:12px}
+    .btn{cursor:pointer;user-select:none}
+    .btn[aria-disabled="true"]{opacity:.5;cursor:not-allowed}
+    #diag{position:fixed;left:12px;bottom:12px;font-size:12px;color:#9aa;white-space:pre-line;z-index:3;max-width:92vw}
+    #overlay{position:fixed;inset:0;display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;background:rgba(0,0,0,.55);z-index:4}
+    .cta{background:#3a7bfd;color:#fff;border:none;border-radius:12px;padding:14px 20px;font-weight:700;cursor:pointer}
     video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
     canvas{display:block}
   </style>
+
+  <!-- Three.js + VR button -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/VRButton.js"></script>
+  <!-- HLS -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
+  <!-- onnxruntime-web (WASM) -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 </head>
 <body>
-  <!-- HUD -->
   <div id="hud">
-    <span class="pill">Build v0.10</span>
-    <span id="enterVR" class="pill btn-pill" aria-disabled="true">Enter VR</span>
+    <span class="pill">Build v1.0 • Light-ML</span>
+    <span id="enterVR" class="pill btn" aria-disabled="true">Enter VR</span>
     <span id="status" class="pill">idle</span>
   </div>
-
-  <!-- Autoplay gate -->
-  <div id="overlay">
-    <button id="playBtn" class="cta">Enable Autoplay</button>
-    <div style="color:#bbb;font-size:13px">Tap once to start playback, then use “Enter VR” (top-left).</div>
-  </div>
-
-  <!-- Hidden media source -->
-  <video id="vid" playsinline muted crossorigin="anonymous"></video>
-
   <div id="diag"></div>
 
-  <script type="module">
-    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+  <div id="overlay">
+    <button id="play" class="cta">Enable autoplay & load</button>
+    <div style="color:#aab">If the button is disabled in VR, click it on the 2D page first.</div>
+  </div>
 
-    // ---------- Config ----------
-    // Use MP4 for smoke tests. Replace with your source when ready.
-    const STREAM_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-    // Inter-ocular parallax (meters). Increase slowly (0.02–0.06).
-    const PARALLAX_M = 0.035;
+  <script>
+  (async function(){
+    // ---------- CONFIG ----------
+    const STREAM_URL = "https://stream.mux.com/bQk01L9P9W5qE01cF53Bf9vYJ3PJLW6c.m3u8";
+    const MODEL_URL  = "/models/midas_small_256.onnx"; // you added this already
 
-    // ---------- DOM ----------
-    const video   = document.getElementById('vid');
-    const playBtn = document.getElementById('playBtn');
-    const overlay = document.getElementById('overlay');
-    const statusE = document.getElementById('status');
-    const enterVR = document.getElementById('enterVR');
-    const diag    = document.getElementById('diag');
+    const DEPTH_IN_W = 256, DEPTH_IN_H = 256; // model expects square; we’ll sample to our grid
+    const GRID_W = 128, GRID_H = 72;          // mesh density (keep modest on Quest)
+    const RUN_EVERY_N_FRAMES = 6;             // throttle depth inference
+    const DEPTH_SCALE_METERS = 0.30;          // parallax strength (0.2–0.35 safe)
+    // ----------------------------
 
-    // ---------- Three / XR ----------
-    let renderer, scene, camera;
-    let videoTex, monoPlane = null;
-    let stereo = { left:null, right:null };
+    const statusEl = document.getElementById('status');
+    const diagEl   = document.getElementById('diag');
+    const playBtn  = document.getElementById('play');
+    const vrBtn    = document.getElementById('enterVR');
+    const overlay  = document.getElementById('overlay');
 
-    initThree();
-    createMonoPlane(); // geometry placeholder; we’ll swap to stereo later
-    animate();
-    wireUI();
-    probeXR(); // initial probe (may enable only after user gesture)
+    function setStatus(s){ statusEl.textContent = s; }
+    function log(s){ diagEl.textContent = s; }
 
-    function wireUI(){
-      const tryPlay = () => startPlayback().catch(()=>{});
-      ['pointerdown','click','touchstart','keydown'].forEach(ev=>{
-        overlay.addEventListener(ev, tryPlay, { passive:true });
-      });
-      playBtn.addEventListener('click', tryPlay);
+    // Video element (kept offscreen)
+    const video = document.createElement('video');
+    video.playsInline = true;
+    video.muted = true; // allow autoplay after user gesture
+    video.crossOrigin = 'anonymous';
+    video.preload = 'auto';
+    document.body.appendChild(video);
 
-      enterVR.addEventListener('click', async ()=>{
-        if (enterVR.getAttribute('aria-disabled') === 'true') {
-          log('Enter VR pressed but XR unsupported (still trying)…');
-        }
-        await startXR();
-      });
+    // HLS hookup
+    if (Hls.isSupported()) {
+      const hls = new Hls({lowLatencyMode:true, backBufferLength:30});
+      hls.loadSource(STREAM_URL);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.ERROR, (e,d)=>log(`[HLS] ${d?.details||'error'}`));
+    } else {
+      video.src = STREAM_URL;
     }
 
-    async function startPlayback(){
-      overlay.style.display = 'none';
-      status('loading…');
+    // Three.js scene
+    const renderer = new THREE.WebGLRenderer({antialias:true, alpha:false});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
+    camera.position.set(0,0,0);
+
+    // Dark room so you don’t see “nothing”
+    const room = new THREE.Mesh(
+      new THREE.BoxGeometry(10,6,10),
+      new THREE.MeshBasicMaterial({color:0x050505, side:THREE.BackSide})
+    );
+    scene.add(room);
+
+    // Video texture
+    const tex = new THREE.VideoTexture(video);
+    tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
+
+    // Panel size (16:9-ish)
+    const PLANE_W = 3.2, PLANE_H = 1.8;
+
+    // Dense mesh that we’ll warp using depth
+    const geo = new THREE.PlaneGeometry(PLANE_W, PLANE_H, GRID_W-1, GRID_H-1);
+    const mat = new THREE.MeshBasicMaterial({map:tex, toneMapped:false});
+    const depthMesh = new THREE.Mesh(geo, mat);
+    depthMesh.position.set(0, 0, -3.0);
+    scene.add(depthMesh);
+
+    // Resize handler
+    addEventListener('resize', ()=>{
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+    });
+
+    // Hidden native VR button
+    const nativeVRBtn = THREE.VRButton.createButton(renderer);
+    nativeVRBtn.style.display = 'none';
+    document.body.appendChild(nativeVRBtn);
+
+    vrBtn.addEventListener('click', ()=> nativeVRBtn.click());
+
+    // ---- onnxruntime-web (WASM) init ----
+    setStatus('loading model…');
+    let session = null;
+    try {
+      ort.env.wasm.numThreads = 1;               // stable on Quest
+      ort.env.wasm.simd = true;                  // enable SIMD if available
+      session = await ort.InferenceSession.create(MODEL_URL, {
+        executionProviders: ['wasm']            // wasm for broad compatibility
+      });
+      setStatus('model ready');
+    } catch (e){
+      setStatus('model failed — showing flat video');
+      log(String(e));
+    }
+
+    // Scratch canvas to feed frames to model
+    const c = document.createElement('canvas');
+    c.width = DEPTH_IN_W; c.height = DEPTH_IN_H;
+    const cx = c.getContext('2d', {willReadFrequently:true});
+
+    // Helpers to build ONNX tensor (NCHW, float32, normalized 0..1)
+    function toCHWFloat32(imgData){
+      const {data,width,height} = imgData;
+      const chw = new Float32Array(1*3*height*width);
+      let r=0,g=height*width,b=2*height*width;
+      for (let i=0,px=0; px<width*height; px++, i+=4){
+        const R = data[i]/255, G = data[i+1]/255, B = data[i+2]/255;
+        chw[r++] = R; chw[g++] = G; chw[b++] = B;
+      }
+      return new ort.Tensor('float32', chw, [1,3,height,width]);
+    }
+
+    // Run depth inference (throttled by RUN_EVERY_N_FRAMES)
+    let frame = 0;
+    const posAttr = geo.attributes.position;
+    const verts = posAttr.array;
+
+    function updateMeshZFromDepth(depthData, outW, outH){
+      // Normalize depth to 0..1 and invert (near=1)
+      let min=Infinity, max=-Infinity;
+      for (let i=0;i<depthData.length;i++){ const v=depthData[i]; if(v<min)min=v; if(v>max)max=v; }
+      const range = (max-min)||1;
+
+      for (let gy=0; gy<GRID_H; gy++){
+        const sy = Math.floor(gy*(outH-1)/(GRID_H-1));
+        for (let gx=0; gx<GRID_W; gx++){
+          const sx = Math.floor(gx*(outW-1)/(GRID_W-1));
+          const di = sy*outW + sx;
+          const dNorm = 1 - ((depthData[di]-min)/range); // near=1
+          const i3 = (gy*GRID_W + gx)*3;
+          verts[i3+2] = -dNorm * DEPTH_SCALE_METERS;
+        }
+      }
+      posAttr.needsUpdate = true;
+    }
+
+    // UI: enable video then VR
+    playBtn.addEventListener('click', async ()=>{
       try{
-        video.src = STREAM_URL;
-        await video.play();            // needs gesture
-        video.muted = false;           // safe to unmute after gesture
-        bindVideoTexture();
-        buildStereoPlanes();           // ← world-space parallax (no UV hacks)
-        status('playing');
-        await probeXR(true);
+        await video.play();
+        overlay.remove();
+        vrBtn.setAttribute('aria-disabled','false');
+        setStatus('playing… enter VR when ready');
       }catch(e){
-        status('playback blocked');
-        overlay.style.display = 'flex';
-        log('play() error: ' + (e?.message || e));
-        throw e;
+        setStatus('tap again to allow playback');
       }
-    }
+    });
 
-    function bindVideoTexture(){
-      if (!videoTex) {
-        videoTex = new THREE.VideoTexture(video);
-        videoTex.colorSpace = THREE.SRGBColorSpace;
-        videoTex.minFilter = THREE.LinearFilter;
-        videoTex.magFilter = THREE.LinearFilter;
-        videoTex.generateMipmaps = false;
-      }
-      // Attach to mono plane until stereo created
-      monoPlane.material.map = videoTex;
-      monoPlane.material.needsUpdate = true;
+    // Render / inference loop
+    renderer.setAnimationLoop(async ()=>{
+      if (!video.paused && !video.ended && session){
+        frame++;
+        if (frame % RUN_EVERY_N_FRAMES === 0){
+          try{
+            // draw current video frame into square input
+            cx.drawImage(video, 0, 0, DEPTH_IN_W, DEPTH_IN_H);
+            const img = cx.getImageData(0, 0, DEPTH_IN_W, DEPTH_IN_H);
+            const input = toCHWFloat32(img);
+            const feeds = { "input": input }; // MiDaS small ONNX often uses "input"—but model IO names vary
 
-      // Keep geometry in correct aspect
-      video.addEventListener('loadedmetadata', ()=>{
-        const w = video.videoWidth || 16, h = video.videoHeight || 9;
-        const aspect = w / Math.max(1, h);
-        const width = 2.8, height = width / aspect;
+            // If your model expects specific input/output names, adjust here:
+            const outputMap = await session.run(feeds);
+            // Pick first output tensor
+            const outName = Object.keys(outputMap)[0];
+            const out = outputMap[outName];
+            const outW = out.dims[out.dims.length-1];
+            const outH = out.dims[out.dims.length-2];
+            const depthData = out.data; // Float32Array length outW*outH
 
-        monoPlane.geometry.dispose();
-        monoPlane.geometry = new THREE.PlaneGeometry(width, height);
-
-        if (stereo.left && stereo.right) {
-          [stereo.left, stereo.right].forEach(mesh=>{
-            mesh.geometry.dispose();
-            mesh.geometry = new THREE.PlaneGeometry(width, height);
-          });
-          // Re-apply positions after geometry change
-          positionStereoPlanes(width);
+            updateMeshZFromDepth(depthData, outW, outH);
+          } catch(e){
+            // If a single frame fails, keep going with last geometry
+            log(`depth frame err: ${e?.message||e}`);
+          }
         }
-      }, { once:true });
-    }
-
-    function createMonoPlane(){
-      const geom = new THREE.PlaneGeometry(2.8, 1.575); // corrected on metadata
-      const mat  = new THREE.MeshBasicMaterial({ color:0xffffff });
-      monoPlane = new THREE.Mesh(geom, mat);
-      monoPlane.position.set(0, 1.6, -2.0);
-      scene.add(monoPlane);
-    }
-
-    // ---- Fixed: world-space parallax (two planes, tiny X-shift) ----
-    function buildStereoPlanes(){
-      if (!videoTex) return;
-
-      // Hide mono, build stereo meshes sharing same video texture
-      monoPlane.visible = false;
-
-      const baseGeom = monoPlane.geometry.clone();
-      const mkMat = () => new THREE.MeshBasicMaterial({ color:0xffffff, map: videoTex });
-
-      stereo.left  = new THREE.Mesh(baseGeom.clone(), mkMat());
-      stereo.right = new THREE.Mesh(baseGeom.clone(), mkMat());
-
-      // Same Z/Y, small opposite X shift; no toe-in (keep cameras parallel)
-      stereo.left.position.set(monoPlane.position.x, monoPlane.position.y, monoPlane.position.z);
-      stereo.right.position.set(monoPlane.position.x, monoPlane.position.y, monoPlane.position.z);
-
-      // Render masks: 1 = left eye, 2 = right eye
-      stereo.left.layers.set(1);
-      stereo.right.layers.set(2);
-
-      scene.add(stereo.left);
-      scene.add(stereo.right);
-
-      const width = baseGeom.parameters.width ?? 2.8;
-      positionStereoPlanes(width);
-    }
-
-    function positionStereoPlanes(width){
-      // Shift is small fraction of screen width to create parallax without visible doubling
-      const shift = PARALLAX_M; // meters
-      stereo.left.position.x  = monoPlane.position.x - (shift/2);
-      stereo.right.position.x = monoPlane.position.x + (shift/2);
-
-      // Optional slight scale-up to hide any seam from binocular disparity
-      const scalePad = 1.01;
-      stereo.left.scale.set(scalePad, scalePad, 1);
-      stereo.right.scale.set(scalePad, scalePad, 1);
-    }
-    // ----------------------------------------------------------------
-
-    async function startXR(){
-      if (!navigator.xr) { status('WebXR not available'); log('navigator.xr is undefined'); return; }
-      try{
-        const session = await navigator.xr.requestSession('immersive-vr', {
-          requiredFeatures: ['local-floor'],
-          optionalFeatures: ['hand-tracking']
-        });
-        renderer.xr.setSession(session);
-        status('VR started');
-        session.addEventListener('end', ()=>{
-          status('VR ended');
-          if (video.paused) video.play().catch(()=>{
-            overlay.style.display='flex';
-          });
-        });
-      }catch(e){
-        status('VR failed');
-        log('requestSession error: ' + (e?.message || e));
       }
-    }
-
-    async function probeXR(afterGesture=false){
-      const httpsOK = (location.protocol === 'https:') || (location.hostname === 'localhost');
-      const xrOK = !!navigator.xr;
-      let supported = false;
-      try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; }
-      catch(e) { log('isSessionSupported threw: ' + e); }
-
-      diag.textContent =
-        `Secure (https or localhost): ${httpsOK}\n`+
-        `navigator.xr present: ${xrOK}\n`+
-        `'immersive-vr' supported: ${supported}`+
-        (afterGesture ? `\n(rechecked after user gesture)` : '');
-
-      enterVR.setAttribute('aria-disabled', supported ? 'false' : 'true');
-    }
-
-    function status(msg){ statusE.textContent = msg; }
-    function log(msg){ diag.textContent += (diag.textContent ? '\n' : '') + msg; }
-
-    // ---------- Three boilerplate ----------
-    function initThree(){
-      renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
-      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.xr.enabled = true;
-      document.body.appendChild(renderer.domElement);
-
-      scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x000000);
-
-      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
-      camera.position.set(0, 1.6, 0);
-
-      scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-
-      // Simple floor so you’re never in total black
-      const floor = new THREE.Mesh(
-        new THREE.CircleGeometry(3.5, 64),
-        new THREE.MeshBasicMaterial({ color:0x101010 })
-      );
-      floor.rotation.x = -Math.PI/2;
-      floor.position.y = 0;
-      scene.add(floor);
-
-      window.addEventListener('resize', ()=>{
-        camera.aspect = window.innerWidth/window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-      });
-    }
-
-    function animate(){
-      renderer.setAnimationLoop(()=>{
-        if (videoTex && !video.paused && !video.ended) {
-          videoTex.needsUpdate = true;
-        }
-        renderer.render(scene, camera);
-      });
-    }
+      renderer.render(scene, camera);
+    });
+  })();
   </script>
 </body>
 </html>
