@@ -44,171 +44,146 @@
   <div id="diag"></div>
 
   <script type="module">
-    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.module.js';
+import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.157.0/examples/jsm/webxr/VRButton.js';
 
-    // -------- Config (use MP4 to avoid HLS issues on Quest while smoke-testing) --------
-    const STREAM_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+let scene, camera, renderer, video, videoTex, plane;
 
-    // -------- DOM --------
-    const video   = document.getElementById('vid');
-    const playBtn = document.getElementById('playBtn');
-    const overlay = document.getElementById('overlay');
-    const statusE = document.getElementById('status');
-    const enterVR = document.getElementById('enterVR');
-    const diag    = document.getElementById('diag');
+init();
+function init() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x000000);
 
-    // -------- Three / XR --------
-    let renderer, scene, camera, plane, videoTex;
+  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+  camera.position.z = 3;
 
-    initThree();
-    setupPlane();
-    animate();
-    wireUI();
-    probeXR(); // initial probe (may say false on some browsers until user gesture)
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.xr.enabled = true;
+  document.body.appendChild(renderer.domElement);
 
-    function wireUI(){
-      // Any tap should try to start playback (Quest can drop button events)
-      const tryPlay = () => startPlayback().catch(()=>{});
-      ['pointerdown','click','touchstart','keydown'].forEach(ev=>{
-        overlay.addEventListener(ev, tryPlay, { passive:true });
-      });
-      playBtn.addEventListener('click', tryPlay);
+  document.body.appendChild(VRButton.createButton(renderer));
 
-      // Persistent Enter VR pill
-      enterVR.addEventListener('click', async ()=>{
-        if (enterVR.getAttribute('aria-disabled') === 'true') {
-          log('Enter VR pressed but XR unsupported. Trying anyway…');
-        }
-        await startXR();
-      });
-    }
+  // version label
+  const div = document.createElement('div');
+  div.textContent = 'VR POC v0.9';
+  div.style.position = 'absolute';
+  div.style.top = '10px';
+  div.style.left = '10px';
+  div.style.color = 'white';
+  div.style.fontFamily = 'monospace';
+  div.style.zIndex = '999';
+  document.body.appendChild(div);
 
-    async function startPlayback(){
-      overlay.style.display = 'none';
-      status('loading…');
-      try{
-        video.src = STREAM_URL;
-        await video.play();        // requires user gesture
-        video.muted = false;       // safe to unmute after gesture
-        bindVideoTexture();
-        status('playing');
-        await probeXR(true);       // re-check after gesture; enable Enter VR if supported
-      }catch(e){
-        status('playback blocked');
-        overlay.style.display = 'flex';
-        log('play() error: ' + (e?.message || e));
-        throw e;
-      }
-    }
+  // play/autoplay button
+  const playBtn = document.createElement('button');
+  playBtn.textContent = 'Enable Autoplay & Play Video';
+  playBtn.style.position = 'absolute';
+  playBtn.style.bottom = '20px';
+  playBtn.style.left = '50%';
+  playBtn.style.transform = 'translateX(-50%)';
+  playBtn.style.padding = '10px 20px';
+  playBtn.style.fontSize = '16px';
+  document.body.appendChild(playBtn);
 
-    function bindVideoTexture(){
-      if (!videoTex) {
-        videoTex = new THREE.VideoTexture(video);
-        videoTex.colorSpace = THREE.SRGBColorSpace;
-        videoTex.minFilter = THREE.LinearFilter;
-        videoTex.magFilter = THREE.LinearFilter;
-        videoTex.generateMipmaps = false;
-      }
-      plane.material.map = videoTex;
-      plane.material.needsUpdate = true;
-    }
+  playBtn.addEventListener('click', () => {
+    playBtn.remove();
+    setupVideo();
+  });
 
-    async function startXR(){
-      if (!navigator.xr) { status('WebXR not available'); log('navigator.xr is undefined'); return; }
-      try{
-        const session = await navigator.xr.requestSession('immersive-vr', {
-          requiredFeatures: ['local-floor'],
-          optionalFeatures: ['hand-tracking']
-        });
-        renderer.xr.setSession(session);
-        status('VR started');
-        session.addEventListener('end', ()=>{
-          status('VR ended');
-          if (video.paused) video.play().catch(()=>{
-            overlay.style.display='flex';
-          });
-        });
-      }catch(e){
-        status('VR failed');
-        log('requestSession error: ' + (e?.message || e));
-      }
-    }
+  window.addEventListener('resize', onWindowResize);
+}
 
-    async function probeXR(afterGesture=false){
-      const httpsOK = (location.protocol === 'https:') || (location.hostname === 'localhost');
-      const xrOK = !!navigator.xr;
-      let supported = false;
-      try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; }
-      catch(e) { log('isSessionSupported threw: ' + e); }
+function setupVideo() {
+  video = document.createElement('video');
+  video.src = 'https://stream.mux.com/KH02NwH01GZ28mI02.m3u8'; // change to your stream
+  video.crossOrigin = 'anonymous';
+  video.loop = true;
+  video.muted = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.play();
 
-      diag.textContent =
-        `Secure (https or localhost): ${httpsOK}\n`+
-        `navigator.xr present: ${xrOK}\n`+
-        `'immersive-vr' supported: ${supported}`+
-        (afterGesture ? `\n(rechecked after user gesture)` : '');
+  videoTex = new THREE.VideoTexture(video);
+  videoTex.minFilter = THREE.LinearFilter;
+  videoTex.magFilter = THREE.LinearFilter;
+  videoTex.format = THREE.RGBFormat;
 
-      enterVR.setAttribute('aria-disabled', supported ? 'false' : 'true');
-    }
+  setupPlane();
+  bindVideoTexture();
+  setupStereoParallax();
+}
 
-    function status(msg){ statusE.textContent = msg; }
-    function log(msg){ diag.textContent += (diag.textContent ? '\n' : '') + msg; }
+function setupPlane() {
+  const geometry = new THREE.PlaneGeometry(2.8, 1.6);
+  const material = new THREE.MeshBasicMaterial({ map: videoTex });
+  plane = new THREE.Mesh(geometry, material);
+  scene.add(plane);
+}
 
-    // ---------- Three boilerplate ----------
-    function initThree(){
-      renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
-      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.xr.enabled = true;
-      document.body.appendChild(renderer.domElement);
+function bindVideoTexture() {
+  video.addEventListener('loadedmetadata', () => {
+    const aspect = video.videoWidth / video.videoHeight;
+    plane.geometry.dispose();
+    plane.geometry = new THREE.PlaneGeometry(2.8, 2.8 / aspect);
+  });
+}
 
-      scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x000000);
+// --- NEW: stereo parallax fake 3D ---
+function setupStereoParallax(){
+  plane.visible = false;
 
-      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
-      camera.position.set(0, 1.6, 0);
+  const makeMat = (shift) => {
+    const m = new THREE.MeshBasicMaterial({ map: videoTex });
+    m.map.wrapS = THREE.ClampToEdgeWrapping;
+    m.map.wrapT = THREE.ClampToEdgeWrapping;
+    m.map.needsUpdate = true;
+    m.userData.shift = shift;
+    return m;
+  };
 
-      scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const geom = plane.geometry.clone();
 
-      // Simple floor disk so you’re never in darkness
-      const floor = new THREE.Mesh(
-        new THREE.CircleGeometry(3.5, 64),
-        new THREE.MeshBasicMaterial({ color:0x101010 })
-      );
-      floor.rotation.x = -Math.PI/2;
-      floor.position.y = 0;
-      scene.add(floor);
+  const left = new THREE.Mesh(geom.clone(), makeMat(-0.005));
+  left.position.copy(plane.position);
+  left.layers.set(1);
+  scene.add(left);
 
-      window.addEventListener('resize', ()=>{
-        camera.aspect = window.innerWidth/window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-      });
-    }
+  const right = new THREE.Mesh(geom.clone(), makeMat(+0.005));
+  right.position.copy(plane.position);
+  right.layers.set(2);
+  scene.add(right);
 
-    function setupPlane(){
-      const geom = new THREE.PlaneGeometry(2.8, 1.575); // temp 16:9
-      const mat  = new THREE.MeshBasicMaterial({ color:0xffffff });
-      plane = new THREE.Mesh(geom, mat);
-      plane.position.set(0, 1.6, -2.0);
-      scene.add(plane);
+  const applyShift = (mesh) => {
+    const s = mesh.material.userData.shift || 0;
+    mesh.material.map.offset.set(0.5 + s, 0.5);
+    mesh.material.map.center.set(0.5, 0.5);
+    mesh.material.needsUpdate = true;
+  };
+  applyShift(left);
+  applyShift(right);
 
-      video.addEventListener('loadedmetadata', ()=>{
-        const w = video.videoWidth || 16, h = video.videoHeight || 9;
-        const aspect = w / Math.max(1, h);
-        const width = 2.8, height = width / aspect;
-        plane.geometry.dispose();
-        plane.geometry = new THREE.PlaneGeometry(width, height);
-      });
-    }
+  video.addEventListener('loadedmetadata', ()=>{
+    const aspect = video.videoWidth / Math.max(1, video.videoHeight);
+    const width = 2.8, height = width / aspect;
+    [left, right].forEach(mesh=>{
+      mesh.geometry.dispose();
+      mesh.geometry = new THREE.PlaneGeometry(width, height);
+      applyShift(mesh);
+    });
+  });
+}
+// ------------------------------------
 
-    function animate(){
-      renderer.setAnimationLoop(()=>{
-        if (plane.material.map === videoTex && !video.paused && !video.ended) {
-          videoTex.needsUpdate = true;
-        }
-        renderer.render(scene, camera);
-      });
-    }
-  </script>
+function onWindowResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+renderer.setAnimationLoop(() => {
+  renderer.render(scene, camera);
+});
+</script>
 </body>
 </html>
