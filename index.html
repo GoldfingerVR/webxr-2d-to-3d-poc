@@ -2,61 +2,88 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>WebXR 2D→3D POC — v0.5</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <title>WebXR 2D→3D POC — v0.6</title>
   <style>
     html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
     #hud{position:fixed;z-index:3;left:16px;top:16px;display:flex;gap:8px;align-items:center;color:#ddd}
     .pill{background:#303030;border-radius:999px;padding:6px 10px;font-size:12px}
     #status{opacity:.85}
     #bigPlay{
-      position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
-      pointer-events:auto;z-index:4;background:rgba(0,0,0,.35)
+      position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;
+      align-items:center;justify-content:center;pointer-events:auto;z-index:4;background:rgba(0,0,0,.35)
     }
-    #bigPlay button{
+    .btn{
       background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;
       padding:14px 22px;border-radius:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)
     }
-    #bigPlay.hidden{display:none}
+    .btn.secondary{background:#1e90ff}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    #diag{position:fixed;left:16px;bottom:16px;color:#aaa;font-size:12px;white-space:pre-line;z-index:3}
     video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
   </style>
 </head>
 <body>
-  <!-- HUD (visible in 2D so you know which build you’re on) -->
+  <!-- Top-left HUD -->
   <div id="hud">
-    <span class="pill">Build v0.5</span>
-    <button id="enterBtn" class="pill">Enter VR</button>
+    <span class="pill">Build v0.6</span>
     <span id="status" class="pill">idle</span>
   </div>
 
-  <!-- Big overlay Play/Pause for user gesture -->
-  <div id="bigPlay"><button id="bigPlayBtn">Play</button></div>
+  <!-- Center overlay for user gestures -->
+  <div id="bigPlay">
+    <button id="playBtn" class="btn">Play</button>
+    <button id="enterVRBtn" class="btn secondary" disabled>Enter VR</button>
+    <div id="hint" style="color:#bbb;font-size:13px">Click Play first (autoplay policy)</div>
+  </div>
 
   <!-- Hidden media element (texture source) -->
   <video id="vid" playsinline muted crossorigin="anonymous"></video>
 
+  <div id="diag"></div>
+
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-    import { VRButton } from 'https://unpkg.com/three@0.160.0/examples/jsm/webxr/VRButton.js';
     import { XRControllerModelFactory } from 'https://unpkg.com/three@0.160.0/examples/jsm/webxr/XRControllerModelFactory.js';
 
-    // ===== CONFIG =====
+    // ------- CONFIG -------
     const STREAM_URL = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'; // swap if needed
 
-    // ===== DOM =====
+    // ------- DOM -------
     const video = document.getElementById('vid');
     const statusEl = document.getElementById('status');
-    const bigPlay = document.getElementById('bigPlay');
-    const bigPlayBtn = document.getElementById('bigPlayBtn');
-    const enterBtn = document.getElementById('enterBtn');
+    const playBtn = document.getElementById('playBtn');
+    const enterVRBtn = document.getElementById('enterVRBtn');
+    const overlay = document.getElementById('bigPlay');
+    const diag = document.getElementById('diag');
 
-    // ===== HLS attach (only if needed) =====
+    // ------- Diagnostics -------
+    async function checkXR() {
+      let httpsOK = (location.protocol === 'https:') || (location.hostname === 'localhost');
+      let xrOK = !!navigator.xr;
+      let supported = false;
+      try {
+        supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false;
+      } catch (e) {}
+      diag.textContent =
+        `Secure context (https): ${httpsOK}\n`+
+        `navigator.xr: ${xrOK}\n`+
+        `'immersive-vr' supported: ${supported}`;
+      if (supported) {
+        enterVRBtn.disabled = false;
+      } else {
+        enterVRBtn.disabled = true;
+      }
+    }
+    checkXR();
+
+    // ------- HLS attach (only if needed) -------
     async function attachSource(url){
       const isHls = /\.m3u8(\?|$)/i.test(url);
       const native = video.canPlayType('application/vnd.apple.mpegurl') !== '';
-      if(isHls && !native){
+      if (isHls && !native) {
         await import('https://cdn.jsdelivr.net/npm/hls.js@latest');
-        if(window.Hls?.isSupported()){
+        if (window.Hls?.isSupported()) {
           const hls = new window.Hls({ maxBufferLength:5, liveBackBufferLength:5 });
           hls.loadSource(url);
           hls.attachMedia(video);
@@ -66,13 +93,12 @@
       video.src = url; // native HLS or MP4
     }
 
-    // ===== THREE / WEBXR =====
+    // ------- THREE / WEBXR -------
     let renderer, scene, camera, plane, videoTex, controller1, controller2;
 
     initThree();
     setupVideoPlane();
     setupControllers();
-    setupXR();
     animate();
 
     function initThree(){
@@ -90,6 +116,15 @@
 
       scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
+      // A simple floor so you’re never “in nothingness”
+      const floor = new THREE.Mesh(
+        new THREE.CircleGeometry(3.5, 64),
+        new THREE.MeshBasicMaterial({ color:0x101010 })
+      );
+      floor.rotation.x = -Math.PI/2;
+      floor.position.y = 0;
+      scene.add(floor);
+
       window.addEventListener('resize', ()=>{
         camera.aspect = window.innerWidth/window.innerHeight;
         camera.updateProjectionMatrix();
@@ -98,11 +133,11 @@
     }
 
     function setupVideoPlane(){
-      // temp geometry; we’ll resize after metadata
+      // Temp 16:9 plane; update after metadata
       const geom = new THREE.PlaneGeometry(2.8, 1.575);
-      const mat = new THREE.MeshBasicMaterial({ color:0xffffff });
+      const mat  = new THREE.MeshBasicMaterial({ color:0xffffff });
       plane = new THREE.Mesh(geom, mat);
-      plane.position.set(0, 1.6, -2); // 2m in front
+      plane.position.set(0, 1.6, -2.0);
       scene.add(plane);
 
       videoTex = new THREE.VideoTexture(video);
@@ -111,12 +146,9 @@
       videoTex.magFilter = THREE.LinearFilter;
       videoTex.generateMipmaps = false;
 
-      // Bind when actually playing
-      plane.material.map = null;
-
       video.addEventListener('loadedmetadata', ()=>{
         const w = video.videoWidth || 16, h = video.videoHeight || 9;
-        const aspect = w/Math.max(1,h);
+        const aspect = w / Math.max(1, h);
         const width = 2.8;
         const height = width / aspect;
         plane.geometry.dispose();
@@ -125,11 +157,12 @@
     }
 
     function makeRay(){
-      const g = new THREE.BufferGeometry().setFromPoints([ new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,-1) ]);
+      const g = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,-1)
+      ]);
       const m = new THREE.LineBasicMaterial({ color:0x44aaff });
-      const line = new THREE.Line(g,m);
-      line.name = 'ray';
-      line.scale.z = 2; // 2m ray
+      const line = new THREE.Line(g, m);
+      line.scale.z = 2;
       return line;
     }
 
@@ -146,85 +179,106 @@
       scene.add(controller2);
 
       // Controller models
-      const controllerModelFactory = new XRControllerModelFactory();
+      const factory = new XRControllerModelFactory();
       const grip1 = renderer.xr.getControllerGrip(0);
-      grip1.add(controllerModelFactory.createControllerModel(grip1));
+      grip1.add(factory.createControllerModel(grip1));
       scene.add(grip1);
 
       const grip2 = renderer.xr.getControllerGrip(1);
-      grip2.add(controllerModelFactory.createControllerModel(grip2));
+      grip2.add(factory.createControllerModel(grip2));
       scene.add(grip2);
     }
 
-    // Trigger / A button toggles play/pause
     function onSelect(){
       togglePlay();
     }
 
-    function setupXR(){
-      document.body.appendChild(VRButton.createButton(renderer));
-      renderer.xr.setSessionInit({
-        optionalFeatures:['local-floor','hand-tracking'] // hands if available
-      });
-
-      enterBtn.addEventListener('click', async ()=>{
-        // Same as clicking VRButton, but keeps a visible control in HUD
-        const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures:['local-floor','hand-tracking'] });
-        renderer.xr.setSession(session);
-      });
-    }
-
-    // ===== UI actions =====
-    bigPlayBtn.addEventListener('click', startPlayback);
+    // ------- UI actions -------
+    playBtn.addEventListener('click', startPlayback);
+    enterVRBtn.addEventListener('click', enterVR);
 
     async function startPlayback(){
-      bigPlay.classList.add('hidden');
+      overlay.style.display = 'none';
       status('loading…');
       try{
         await attachSource(STREAM_URL);
         await video.play();
-        // Try to unmute after user gesture
-        video.muted = false;
+        video.muted = false; // allowed after user gesture
         plane.material.map = videoTex;
         plane.material.needsUpdate = true;
         status('playing');
       }catch(e){
-        status('playback blocked — click Play again');
         console.error(e);
-        bigPlay.classList.remove('hidden');
+        status('playback blocked — click Play again');
+        overlay.style.display = 'flex';
+      }
+    }
+
+    async function enterVR(){
+      if (!navigator.xr) {
+        status('WebXR not available');
+        return;
+      }
+      try{
+        const session = await navigator.xr.requestSession('immersive-vr', {
+          requiredFeatures: ['local-floor'],
+          optionalFeatures: ['hand-tracking']
+        });
+        renderer.xr.setSession(session);
+        status('VR started');
+        session.addEventListener('end', ()=>{
+          status('VR ended');
+          // Try to keep playback alive after exit
+          if (video.paused) {
+            video.play().catch(()=>{ overlay.style.display='flex'; });
+          }
+        });
+      }catch(e){
+        console.error(e);
+        status('VR request failed');
       }
     }
 
     function togglePlay(){
-      if(video.paused){
+      if (video.paused) {
         video.play().then(()=>{
           video.muted = false;
           status('playing');
-          bigPlay.classList.add('hidden');
+          overlay.style.display = 'none';
         }).catch(err=>{
-          status('playback blocked');
           console.error(err);
-          bigPlay.classList.remove('hidden');
+          status('playback blocked');
+          overlay.style.display = 'flex';
         });
-      }else{
+      } else {
         video.pause();
         status('paused');
-        bigPlay.classList.remove('hidden');
-        bigPlayBtn.textContent = 'Resume';
+        overlay.style.display = 'flex';
+        playBtn.textContent = 'Resume';
       }
     }
 
     function status(msg){ statusEl.textContent = msg; }
 
-    // ===== Render loop =====
+    // ------- Render loop -------
     function animate(){
       renderer.setAnimationLoop(()=>{
-        if(plane.material.map === videoTex && !video.paused && !video.ended){
+        if (plane.material.map === videoTex && !video.paused && !video.ended) {
           videoTex.needsUpdate = true;
         }
-        renderer.render(scene,camera);
+        renderer.render(scene, camera);
       });
     }
+
+    // Try to resume when coming back to tab
+    document.addEventListener('visibilitychange', ()=>{
+      if (document.visibilityState === 'visible' && video.paused) {
+        video.play().catch(()=>{ overlay.style.display='flex'; });
+      }
+    });
+    window.addEventListener('focus', ()=>{
+      if (video.paused) video.play().catch(()=>{ overlay.style.display='flex'; });
+    });
   </script>
 </body>
 </html>
