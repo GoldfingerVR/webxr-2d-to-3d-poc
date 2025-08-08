@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>WebXR 2D→Fake-3D POC — v0.9</title>
+  <title>WebXR 2D→Fake-3D POC — v0.10</title>
   <style>
     html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
     #hud{position:fixed;z-index:3;left:16px;top:16px;display:flex;gap:8px;align-items:center}
@@ -25,9 +25,9 @@
   </style>
 </head>
 <body>
-  <!-- HUD (always visible) -->
+  <!-- HUD -->
   <div id="hud">
-    <span class="pill">Build v0.9</span>
+    <span class="pill">Build v0.10</span>
     <span id="enterVR" class="pill btn-pill" aria-disabled="true">Enter VR</span>
     <span id="status" class="pill">idle</span>
   </div>
@@ -46,11 +46,13 @@
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
 
-    // -------- Config (use MP4 to avoid HLS issues for smoke test) --------
-    // Replace with your own MP4 when ready.
+    // ---------- Config ----------
+    // Use MP4 for smoke tests. Replace with your source when ready.
     const STREAM_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+    // Inter-ocular parallax (meters). Increase slowly (0.02–0.06).
+    const PARALLAX_M = 0.035;
 
-    // -------- DOM refs --------
+    // ---------- DOM ----------
     const video   = document.getElementById('vid');
     const playBtn = document.getElementById('playBtn');
     const overlay = document.getElementById('overlay');
@@ -58,15 +60,16 @@
     const enterVR = document.getElementById('enterVR');
     const diag    = document.getElementById('diag');
 
-    // -------- Three / XR --------
-    let renderer, scene, camera, plane, videoTex;
-    let stereo = { left:null, right:null }; // per-eye meshes
+    // ---------- Three / XR ----------
+    let renderer, scene, camera;
+    let videoTex, monoPlane = null;
+    let stereo = { left:null, right:null };
 
     initThree();
-    setupPlane();
+    createMonoPlane(); // geometry placeholder; we’ll swap to stereo later
     animate();
     wireUI();
-    probeXR(); // initial probe (may be false until after gesture)
+    probeXR(); // initial probe (may enable only after user gesture)
 
     function wireUI(){
       const tryPlay = () => startPlayback().catch(()=>{});
@@ -75,7 +78,6 @@
       });
       playBtn.addEventListener('click', tryPlay);
 
-      // Persistent Enter VR pill
       enterVR.addEventListener('click', async ()=>{
         if (enterVR.getAttribute('aria-disabled') === 'true') {
           log('Enter VR pressed but XR unsupported (still trying)…');
@@ -89,12 +91,12 @@
       status('loading…');
       try{
         video.src = STREAM_URL;
-        await video.play();            // requires user gesture
+        await video.play();            // needs gesture
         video.muted = false;           // safe to unmute after gesture
         bindVideoTexture();
-        setupStereoParallax();         // fake depth using per-eye UV shifts
+        buildStereoPlanes();           // ← world-space parallax (no UV hacks)
         status('playing');
-        await probeXR(true);           // re-check after gesture; enable Enter VR if supported
+        await probeXR(true);
       }catch(e){
         status('playback blocked');
         overlay.style.display = 'flex';
@@ -111,75 +113,78 @@
         videoTex.magFilter = THREE.LinearFilter;
         videoTex.generateMipmaps = false;
       }
-      plane.material.map = videoTex;
-      plane.material.needsUpdate = true;
+      // Attach to mono plane until stereo created
+      monoPlane.material.map = videoTex;
+      monoPlane.material.needsUpdate = true;
 
-      // keep plane & stereo sizes in sync with real aspect
+      // Keep geometry in correct aspect
       video.addEventListener('loadedmetadata', ()=>{
         const w = video.videoWidth || 16, h = video.videoHeight || 9;
         const aspect = w / Math.max(1, h);
         const width = 2.8, height = width / aspect;
 
-        plane.geometry.dispose();
-        plane.geometry = new THREE.PlaneGeometry(width, height);
+        monoPlane.geometry.dispose();
+        monoPlane.geometry = new THREE.PlaneGeometry(width, height);
 
         if (stereo.left && stereo.right) {
           [stereo.left, stereo.right].forEach(mesh=>{
             mesh.geometry.dispose();
             mesh.geometry = new THREE.PlaneGeometry(width, height);
-            applyShift(mesh);
           });
+          // Re-apply positions after geometry change
+          positionStereoPlanes(width);
         }
       }, { once:true });
     }
 
-    function setupPlane(){
-      const geom = new THREE.PlaneGeometry(2.8, 1.575); // temp 16:9, corrected on metadata
+    function createMonoPlane(){
+      const geom = new THREE.PlaneGeometry(2.8, 1.575); // corrected on metadata
       const mat  = new THREE.MeshBasicMaterial({ color:0xffffff });
-      plane = new THREE.Mesh(geom, mat);
-      plane.position.set(0, 1.6, -2.0);
-      scene.add(plane);
+      monoPlane = new THREE.Mesh(geom, mat);
+      monoPlane.position.set(0, 1.6, -2.0);
+      scene.add(monoPlane);
     }
 
-    // --- Fake stereo via per-eye UV offset (simple parallax) ---
-    function setupStereoParallax(){
-      // hide mono plane
-      plane.visible = false;
+    // ---- Fixed: world-space parallax (two planes, tiny X-shift) ----
+    function buildStereoPlanes(){
+      if (!videoTex) return;
 
-      const makeMat = (shift) => {
-        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, map: videoTex });
-        m.map.wrapS = THREE.ClampToEdgeWrapping;
-        m.map.wrapT = THREE.ClampToEdgeWrapping;
-        m.userData.shift = shift; // store for reapply
-        return m;
-      };
+      // Hide mono, build stereo meshes sharing same video texture
+      monoPlane.visible = false;
 
-      const baseGeom = plane.geometry.clone();
+      const baseGeom = monoPlane.geometry.clone();
+      const mkMat = () => new THREE.MeshBasicMaterial({ color:0xffffff, map: videoTex });
 
-      // LEFT eye only
-      stereo.left = new THREE.Mesh(baseGeom.clone(), makeMat(-0.006)); // tune magnitude as needed
-      stereo.left.position.copy(plane.position);
+      stereo.left  = new THREE.Mesh(baseGeom.clone(), mkMat());
+      stereo.right = new THREE.Mesh(baseGeom.clone(), mkMat());
+
+      // Same Z/Y, small opposite X shift; no toe-in (keep cameras parallel)
+      stereo.left.position.set(monoPlane.position.x, monoPlane.position.y, monoPlane.position.z);
+      stereo.right.position.set(monoPlane.position.x, monoPlane.position.y, monoPlane.position.z);
+
+      // Render masks: 1 = left eye, 2 = right eye
       stereo.left.layers.set(1);
-      scene.add(stereo.left);
-
-      // RIGHT eye only
-      stereo.right = new THREE.Mesh(baseGeom.clone(), makeMat(+0.006));
-      stereo.right.position.copy(plane.position);
       stereo.right.layers.set(2);
+
+      scene.add(stereo.left);
       scene.add(stereo.right);
 
-      applyShift(stereo.left);
-      applyShift(stereo.right);
+      const width = baseGeom.parameters.width ?? 2.8;
+      positionStereoPlanes(width);
     }
 
-    function applyShift(mesh){
-      const s = mesh.material.userData.shift || 0;
-      // Offset around texture center to avoid sampling outside edges
-      mesh.material.map.center.set(0.5, 0.5);
-      mesh.material.map.offset.set(0.5 + s, 0.5);
-      mesh.material.needsUpdate = true;
+    function positionStereoPlanes(width){
+      // Shift is small fraction of screen width to create parallax without visible doubling
+      const shift = PARALLAX_M; // meters
+      stereo.left.position.x  = monoPlane.position.x - (shift/2);
+      stereo.right.position.x = monoPlane.position.x + (shift/2);
+
+      // Optional slight scale-up to hide any seam from binocular disparity
+      const scalePad = 1.01;
+      stereo.left.scale.set(scalePad, scalePad, 1);
+      stereo.right.scale.set(scalePad, scalePad, 1);
     }
-    // -----------------------------------------------------------
+    // ----------------------------------------------------------------
 
     async function startXR(){
       if (!navigator.xr) { status('WebXR not available'); log('navigator.xr is undefined'); return; }
@@ -237,7 +242,7 @@
 
       scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
-      // simple floor so you’re never in total black
+      // Simple floor so you’re never in total black
       const floor = new THREE.Mesh(
         new THREE.CircleGeometry(3.5, 64),
         new THREE.MeshBasicMaterial({ color:0x101010 })
