@@ -1,78 +1,84 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>WebXR 2D→3D POC (Video Plane)</title>
+  <title>WebXR 2D→3D POC — v0.5</title>
   <style>
-    html, body { margin:0; height:100%; background:#000; overflow:hidden; }
-    #ui {
-      position:fixed; z-index:3; left:16px; top:16px; display:flex; gap:8px; align-items:center;
-      font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:#ddd;
+    html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+    #hud{position:fixed;z-index:3;left:16px;top:16px;display:flex;gap:8px;align-items:center;color:#ddd}
+    .pill{background:#303030;border-radius:999px;padding:6px 10px;font-size:12px}
+    #status{opacity:.85}
+    #bigPlay{
+      position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+      pointer-events:auto;z-index:4;background:rgba(0,0,0,.35)
     }
-    button { background:#3b3b3b; color:#fff; border:none; padding:10px 14px; border-radius:10px; cursor:pointer; }
-    button:disabled { opacity:.5; cursor:not-allowed; }
-    #status { opacity:.8 }
-    /* keep the HTML <video> off-screen – we only use it as a texture */
-    video { position:fixed; left:-9999px; top:-9999px; width:1px; height:1px; }
+    #bigPlay button{
+      background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;
+      padding:14px 22px;border-radius:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)
+    }
+    #bigPlay.hidden{display:none}
+    video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
   </style>
 </head>
 <body>
-  <div id="ui">
-    <button id="loadBtn">Load & Play</button>
-    <span id="status">idle</span>
+  <!-- HUD (visible in 2D so you know which build you’re on) -->
+  <div id="hud">
+    <span class="pill">Build v0.5</span>
+    <button id="enterBtn" class="pill">Enter VR</button>
+    <span id="status" class="pill">idle</span>
   </div>
 
-  <!-- Your stream: HLS (.m3u8) works in Oculus Browser; MP4 works everywhere -->
-  <video id="vid" playsinline crossorigin="anonymous" muted></video>
+  <!-- Big overlay Play/Pause for user gesture -->
+  <div id="bigPlay"><button id="bigPlayBtn">Play</button></div>
 
-  <!-- three.js + helpers -->
+  <!-- Hidden media element (texture source) -->
+  <video id="vid" playsinline muted crossorigin="anonymous"></video>
+
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
     import { VRButton } from 'https://unpkg.com/three@0.160.0/examples/jsm/webxr/VRButton.js';
+    import { XRControllerModelFactory } from 'https://unpkg.com/three@0.160.0/examples/jsm/webxr/XRControllerModelFactory.js';
 
-    // ====== CONFIG ======
-    const STREAM_URL =
-      // MP4 fallback (public demo)
-      'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
-      // If you have a direct MP4, swap it in (often starts faster in desktop browsers)
-      // 'https://d2zihajmogu5jn.cloudfront.net/bipbop-adv/master.m3u8';
+    // ===== CONFIG =====
+    const STREAM_URL = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'; // swap if needed
 
-    // ====== ELEMENTS ======
-    const video  = document.getElementById('vid');
-    const loadBtn = document.getElementById('loadBtn');
+    // ===== DOM =====
+    const video = document.getElementById('vid');
     const statusEl = document.getElementById('status');
+    const bigPlay = document.getElementById('bigPlay');
+    const bigPlayBtn = document.getElementById('bigPlayBtn');
+    const enterBtn = document.getElementById('enterBtn');
 
-    // If it’s HLS and the browser doesn’t do native HLS, use hls.js dynamically.
-    async function attachSource(url) {
+    // ===== HLS attach (only if needed) =====
+    async function attachSource(url){
       const isHls = /\.m3u8(\?|$)/i.test(url);
-      const supportsNativeHls = video.canPlayType('application/vnd.apple.mpegurl') !== '';
-      if (isHls && !supportsNativeHls) {
-        // lazy-load hls.js
+      const native = video.canPlayType('application/vnd.apple.mpegurl') !== '';
+      if(isHls && !native){
         await import('https://cdn.jsdelivr.net/npm/hls.js@latest');
-        if (window.Hls && window.Hls.isSupported()) {
-          const hls = new window.Hls({ maxBufferLength: 5, liveBackBufferLength: 5 });
+        if(window.Hls?.isSupported()){
+          const hls = new window.Hls({ maxBufferLength:5, liveBackBufferLength:5 });
           hls.loadSource(url);
           hls.attachMedia(video);
           return;
         }
       }
-      // Native path (or MP4)
-      video.src = url;
+      video.src = url; // native HLS or MP4
     }
 
-    // ====== THREE / WEBXR SCENE ======
-    let renderer, scene, camera, videoTex, plane, clock;
+    // ===== THREE / WEBXR =====
+    let renderer, scene, camera, plane, videoTex, controller1, controller2;
 
     initThree();
-    setupPlane();
-    setupXRButton();
-    tick();
+    setupVideoPlane();
+    setupControllers();
+    setupXR();
+    animate();
 
-    function initThree() {
+    function initThree(){
       renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
       renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.xr.enabled = true;
       document.body.appendChild(renderer.domElement);
 
@@ -80,97 +86,145 @@
       scene.background = new THREE.Color(0x000000);
 
       camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
-      camera.position.set(0, 1.6, 0); // eye height-ish
+      camera.position.set(0, 1.6, 0);
 
-      clock = new THREE.Clock();
+      scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
-      // tiny ambient so "darkness" never happens
-      const amb = new THREE.AmbientLight(0xffffff, 0.6);
-      scene.add(amb);
-
-      window.addEventListener('resize', () => {
-        camera.aspect = window.innerWidth / window.innerHeight;
+      window.addEventListener('resize', ()=>{
+        camera.aspect = window.innerWidth/window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
       });
     }
 
-    function setupPlane() {
-      // Start with a neutral 16:9 plane, adjust after metadata loads.
-      const geom = new THREE.PlaneGeometry(2.8, 1.575); // ~2.8m wide @ 16:9
-      const mat  = new THREE.MeshBasicMaterial({ color: 0xffffff });
-
+    function setupVideoPlane(){
+      // temp geometry; we’ll resize after metadata
+      const geom = new THREE.PlaneGeometry(2.8, 1.575);
+      const mat = new THREE.MeshBasicMaterial({ color:0xffffff });
       plane = new THREE.Mesh(geom, mat);
-      plane.position.set(0, 1.6, -2); // 2 meters in front of user’s eyes
+      plane.position.set(0, 1.6, -2); // 2m in front
       scene.add(plane);
 
-      // Prepare video texture but attach only after playback starts
       videoTex = new THREE.VideoTexture(video);
-      videoTex.encoding = THREE.sRGBEncoding;
-      videoTex.colorSpace = THREE.SRGBColorSpace ?? THREE.SRGBColorSpace; // forward compat
+      videoTex.colorSpace = THREE.SRGBColorSpace;
       videoTex.minFilter = THREE.LinearFilter;
       videoTex.magFilter = THREE.LinearFilter;
       videoTex.generateMipmaps = false;
-      videoTex.needsUpdate = false; // will flip true once playing
 
-      // set once attached
+      // Bind when actually playing
       plane.material.map = null;
-      plane.material.needsUpdate = true;
 
-      // When video metadata is known, resize plane for correct aspect
-      video.addEventListener('loadedmetadata', () => {
-        const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
-        const aspect = vw / Math.max(1, vh);
-        const height = 2.8 / aspect; // keep width 2.8m
+      video.addEventListener('loadedmetadata', ()=>{
+        const w = video.videoWidth || 16, h = video.videoHeight || 9;
+        const aspect = w/Math.max(1,h);
+        const width = 2.8;
+        const height = width / aspect;
         plane.geometry.dispose();
-        plane.geometry = new THREE.PlaneGeometry(2.8, height);
+        plane.geometry = new THREE.PlaneGeometry(width, height);
       });
     }
 
-    function setupXRButton() {
+    function makeRay(){
+      const g = new THREE.BufferGeometry().setFromPoints([ new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,-1) ]);
+      const m = new THREE.LineBasicMaterial({ color:0x44aaff });
+      const line = new THREE.Line(g,m);
+      line.name = 'ray';
+      line.scale.z = 2; // 2m ray
+      return line;
+    }
+
+    function setupControllers(){
+      // Rays
+      controller1 = renderer.xr.getController(0);
+      controller1.addEventListener('selectstart', onSelect);
+      controller1.add(makeRay());
+      scene.add(controller1);
+
+      controller2 = renderer.xr.getController(1);
+      controller2.addEventListener('selectstart', onSelect);
+      controller2.add(makeRay());
+      scene.add(controller2);
+
+      // Controller models
+      const controllerModelFactory = new XRControllerModelFactory();
+      const grip1 = renderer.xr.getControllerGrip(0);
+      grip1.add(controllerModelFactory.createControllerModel(grip1));
+      scene.add(grip1);
+
+      const grip2 = renderer.xr.getControllerGrip(1);
+      grip2.add(controllerModelFactory.createControllerModel(grip2));
+      scene.add(grip2);
+    }
+
+    // Trigger / A button toggles play/pause
+    function onSelect(){
+      togglePlay();
+    }
+
+    function setupXR(){
       document.body.appendChild(VRButton.createButton(renderer));
-      // request hand-tracking optionally (we’ll wire visuals later)
       renderer.xr.setSessionInit({
-        optionalFeatures: ['local-floor', 'hand-tracking']
+        optionalFeatures:['local-floor','hand-tracking'] // hands if available
+      });
+
+      enterBtn.addEventListener('click', async ()=>{
+        // Same as clicking VRButton, but keeps a visible control in HUD
+        const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures:['local-floor','hand-tracking'] });
+        renderer.xr.setSession(session);
       });
     }
 
-    // ====== PLAYBACK FLOW ======
-    loadBtn.addEventListener('click', async () => {
-      loadBtn.disabled = true;
-      status('loading…');
-      try {
-        await attachSource(STREAM_URL);
-        // user gesture already happened (click), try to play
-        await video.play();
-        // unmute (Oculus usually allows after gesture)
-        video.muted = false;
+    // ===== UI actions =====
+    bigPlayBtn.addEventListener('click', startPlayback);
 
-        // bind texture
+    async function startPlayback(){
+      bigPlay.classList.add('hidden');
+      status('loading…');
+      try{
+        await attachSource(STREAM_URL);
+        await video.play();
+        // Try to unmute after user gesture
+        video.muted = false;
         plane.material.map = videoTex;
         plane.material.needsUpdate = true;
-        videoTex.needsUpdate = true;
-
         status('playing');
-      } catch (e) {
-        status('playback blocked – tap button again if needed');
+      }catch(e){
+        status('playback blocked — click Play again');
         console.error(e);
-        loadBtn.disabled = false;
+        bigPlay.classList.remove('hidden');
       }
-    });
-
-    // ====== RENDER LOOP ======
-    function tick() {
-      renderer.setAnimationLoop(() => {
-        // keep texture fresh
-        if (!video.paused && !video.ended) {
-          videoTex.needsUpdate = true;
-        }
-        renderer.render(scene, camera);
-      });
     }
 
-    function status(msg) { statusEl.textContent = msg; }
+    function togglePlay(){
+      if(video.paused){
+        video.play().then(()=>{
+          video.muted = false;
+          status('playing');
+          bigPlay.classList.add('hidden');
+        }).catch(err=>{
+          status('playback blocked');
+          console.error(err);
+          bigPlay.classList.remove('hidden');
+        });
+      }else{
+        video.pause();
+        status('paused');
+        bigPlay.classList.remove('hidden');
+        bigPlayBtn.textContent = 'Resume';
+      }
+    }
+
+    function status(msg){ statusEl.textContent = msg; }
+
+    // ===== Render loop =====
+    function animate(){
+      renderer.setAnimationLoop(()=>{
+        if(plane.material.map === videoTex && !video.paused && !video.ended){
+          videoTex.needsUpdate = true;
+        }
+        renderer.render(scene,camera);
+      });
+    }
   </script>
 </body>
 </html>
