@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebXR 2D Stream Test</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style>
+    html,body {height:100%; margin:0; background:#000; display:flex; align-items:center; justify-content:center;}
+    #start {position:absolute; inset:auto; bottom:24px; background:#1e90ff; color:#fff; border:0; padding:12px 18px; border-radius:8px; font-size:16px;}
+    video {max-width:100vw; max-height:100vh; background:#000;}
+  </style>
+</head>
+<body>
+  <video id="video" playsinline controls muted></video>
+  <button id="start">Tap to start</button>
+
+  <script>
+    const video = document.getElementById('video');
+    const btn = document.getElementById('start');
+
+    // Public test HLS (HTTPS + CORS OK). Swap later to your own.
+    const src = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
+
+    function loadAndPlay(){
+      btn.style.display = 'none';
+      if (Hls.isSupported()) {
+        const hls = new Hls({lowLatencyMode:true});
+        hls.loadSource(src);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = src; video.play().catch(()=>{});
+      } else {
+        alert('HLS not supported in this browser');
+      }
+    }
+    btn.addEventListener('click', loadAndPlay);
+  </script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebXR 2D Stream Test</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style>
+    html,body {height:100%; margin:0; background:#000; display:flex; align-items:center; justify-content:center;}
+    #start {position:absolute; inset:auto; bottom:24px; background:#1e90ff; color:#fff; border:0; padding:12px 18px; border-radius:8px; font-size:16px;}
+    video {max-width:100vw; max-height:100vh; background:#000;}
+  </style>
+</head>
+<body>
+  <video id="video" playsinline controls muted></video>
+  <button id="start">Tap to start</button>
+
+  <script>
+    const video = document.getElementById('video');
+    const btn = document.getElementById('start');
+
+    // Public test HLS (HTTPS + CORS OK). Swap later to your own.
+    const src = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
+
+    function loadAndPlay(){
+      btn.style.display = 'none';
+      if (Hls.isSupported()) {
+        const hls = new Hls({lowLatencyMode:true});
+        hls.loadSource(src);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = src; video.play().catch(()=>{});
+      } else {
+        alert('HLS not supported in this browser');
+      }
+    }
+    btn.addEventListener('click', loadAndPlay);
+  </script>
+</body>
+</html>
