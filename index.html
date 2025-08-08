@@ -3,75 +3,84 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>WebXR Video Smoke — v0.7</title>
+  <title>WebXR Video POC — v0.8</title>
   <style>
     html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-    #hud{position:fixed;z-index:3;left:16px;top:16px;display:flex;gap:8px;align-items:center;color:#ddd}
-    .pill{background:#303030;border-radius:999px;padding:6px 10px;font-size:12px}
+    #hud{position:fixed;z-index:3;left:16px;top:16px;display:flex;gap:8px;align-items:center}
+    .pill{background:#303030;color:#e0e0e0;border-radius:999px;padding:6px 10px;font-size:12px;border:1px solid #444}
+    .btn-pill{cursor:pointer;user-select:none}
+    .btn-pill[aria-disabled="true"]{opacity:.45;cursor:not-allowed}
     #status{opacity:.85}
     #overlay{
-      position:fixed;inset:0;display:flex;flex-direction:column;gap:12px;
-      align-items:center;justify-content:center;z-index:4;background:rgba(0,0,0,.35)
+      position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;
+      align-items:center;justify-content:center;z-index:4;background:rgba(0,0,0,.5)
     }
-    .btn{
+    .cta{
       background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;
       padding:14px 22px;border-radius:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)
     }
-    .btn.secondary{background:#1e90ff}
-    .btn:disabled{opacity:.5;cursor:not-allowed}
-    #diag{position:fixed;left:12px;bottom:12px;color:#aaa;font-size:12px;white-space:pre-line;z-index:3;max-width:90vw}
+    #diag{position:fixed;left:12px;bottom:12px;color:#aaa;font-size:12px;white-space:pre-line;z-index:3;max-width:92vw}
     video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
     canvas{display:block}
   </style>
 </head>
 <body>
+  <!-- HUD (always visible) -->
   <div id="hud">
-    <span class="pill">Build v0.7</span>
+    <span class="pill">Build v0.8</span>
+    <span id="enterVR" class="pill btn-pill" aria-disabled="true">Enter VR</span>
     <span id="status" class="pill">idle</span>
   </div>
 
+  <!-- Autoplay gate -->
   <div id="overlay">
-    <button id="playBtn" class="btn">Play</button>
-    <button id="vrBtn" class="btn secondary" disabled>Enter VR</button>
-    <div style="color:#bbb;font-size:13px">Tip: tap anywhere if the button seems unresponsive</div>
+    <button id="playBtn" class="cta">Enable Autoplay</button>
+    <div style="color:#bbb;font-size:13px">Tap once to start playback, then use “Enter VR” (top-left).</div>
   </div>
 
+  <!-- Hidden media source -->
   <video id="vid" playsinline muted crossorigin="anonymous"></video>
+
   <div id="diag"></div>
 
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
 
-    // ===== Config: plain MP4 to avoid HLS edge-cases =====
+    // -------- Config (use MP4 to avoid HLS issues on Quest while smoke-testing) --------
     const STREAM_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
 
-    // ===== DOM =====
-    const video = document.getElementById('vid');
-    const statusEl = document.getElementById('status');
+    // -------- DOM --------
+    const video   = document.getElementById('vid');
     const playBtn = document.getElementById('playBtn');
-    const vrBtn   = document.getElementById('vrBtn');
     const overlay = document.getElementById('overlay');
+    const statusE = document.getElementById('status');
+    const enterVR = document.getElementById('enterVR');
     const diag    = document.getElementById('diag');
 
-    // ===== XR/Three =====
+    // -------- Three / XR --------
     let renderer, scene, camera, plane, videoTex;
 
     initThree();
     setupPlane();
     animate();
-    hardenGestures();
-    checkXR();
+    wireUI();
+    probeXR(); // initial probe (may say false on some browsers until user gesture)
 
-    // Make *any* tap try to play (Quest sometimes drops clicks)
-    function hardenGestures(){
+    function wireUI(){
+      // Any tap should try to start playback (Quest can drop button events)
       const tryPlay = () => startPlayback().catch(()=>{});
-      ['pointerdown','pointerup','click','touchstart','touchend','keydown'].forEach(ev=>{
-        document.addEventListener(ev, (e)=>{
-          if (overlay.style.display !== 'none') tryPlay();
-        }, { passive:true });
+      ['pointerdown','click','touchstart','keydown'].forEach(ev=>{
+        overlay.addEventListener(ev, tryPlay, { passive:true });
       });
       playBtn.addEventListener('click', tryPlay);
-      vrBtn.addEventListener('click', enterVR);
+
+      // Persistent Enter VR pill
+      enterVR.addEventListener('click', async ()=>{
+        if (enterVR.getAttribute('aria-disabled') === 'true') {
+          log('Enter VR pressed but XR unsupported. Trying anyway…');
+        }
+        await startXR();
+      });
     }
 
     async function startPlayback(){
@@ -79,21 +88,20 @@
       status('loading…');
       try{
         video.src = STREAM_URL;
-        await video.play();           // user gesture required
-        video.muted = false;          // unmute after gesture
-        bindTexture();
+        await video.play();        // requires user gesture
+        video.muted = false;       // safe to unmute after gesture
+        bindVideoTexture();
         status('playing');
-        await checkXR(true);          // re-check XR after user gesture
-        vrBtn.disabled = false;       // allow trying VR regardless; we'll catch errors
+        await probeXR(true);       // re-check after gesture; enable Enter VR if supported
       }catch(e){
         status('playback blocked');
         overlay.style.display = 'flex';
-        logDiag('play() error: ' + (e && e.message ? e.message : e));
+        log('play() error: ' + (e?.message || e));
         throw e;
       }
     }
 
-    function bindTexture(){
+    function bindVideoTexture(){
       if (!videoTex) {
         videoTex = new THREE.VideoTexture(video);
         videoTex.colorSpace = THREE.SRGBColorSpace;
@@ -105,8 +113,8 @@
       plane.material.needsUpdate = true;
     }
 
-    async function enterVR(){
-      if (!navigator.xr) { status('WebXR missing'); logDiag('navigator.xr is undefined'); return; }
+    async function startXR(){
+      if (!navigator.xr) { status('WebXR not available'); log('navigator.xr is undefined'); return; }
       try{
         const session = await navigator.xr.requestSession('immersive-vr', {
           requiredFeatures: ['local-floor'],
@@ -116,32 +124,36 @@
         status('VR started');
         session.addEventListener('end', ()=>{
           status('VR ended');
-          if (video.paused) video.play().catch(()=>{ overlay.style.display='flex'; });
+          if (video.paused) video.play().catch(()=>{
+            overlay.style.display='flex';
+          });
         });
       }catch(e){
         status('VR failed');
-        logDiag('requestSession error: ' + (e && e.message ? e.message : e));
+        log('requestSession error: ' + (e?.message || e));
       }
     }
 
-    async function checkXR(afterGesture=false){
+    async function probeXR(afterGesture=false){
       const httpsOK = (location.protocol === 'https:') || (location.hostname === 'localhost');
       const xrOK = !!navigator.xr;
       let supported = false;
       try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; }
-      catch(e) { logDiag('isSessionSupported threw: ' + e); }
+      catch(e) { log('isSessionSupported threw: ' + e); }
+
       diag.textContent =
-        `Secure context (https): ${httpsOK}\n`+
-        `navigator.xr: ${xrOK}\n`+
-        `'immersive-vr' supported: ${supported}\n`+
-        (afterGesture ? '(rechecked after user gesture)\n' : '');
-      vrBtn.disabled = !supported && !afterGesture; // allow manual try after gesture
+        `Secure (https or localhost): ${httpsOK}\n`+
+        `navigator.xr present: ${xrOK}\n`+
+        `'immersive-vr' supported: ${supported}`+
+        (afterGesture ? `\n(rechecked after user gesture)` : '');
+
+      enterVR.setAttribute('aria-disabled', supported ? 'false' : 'true');
     }
 
-    function status(msg){ statusEl.textContent = msg; }
-    function logDiag(msg){ diag.textContent += (diag.textContent ? '\n' : '') + msg; }
+    function status(msg){ statusE.textContent = msg; }
+    function log(msg){ diag.textContent += (diag.textContent ? '\n' : '') + msg; }
 
-    // ===== Three boilerplate =====
+    // ---------- Three boilerplate ----------
     function initThree(){
       renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
       renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -157,6 +169,7 @@
 
       scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
+      // Simple floor disk so you’re never in darkness
       const floor = new THREE.Mesh(
         new THREE.CircleGeometry(3.5, 64),
         new THREE.MeshBasicMaterial({ color:0x101010 })
@@ -173,7 +186,7 @@
     }
 
     function setupPlane(){
-      const geom = new THREE.PlaneGeometry(2.8, 1.575);
+      const geom = new THREE.PlaneGeometry(2.8, 1.575); // temp 16:9
       const mat  = new THREE.MeshBasicMaterial({ color:0xffffff });
       plane = new THREE.Mesh(geom, mat);
       plane.position.set(0, 1.6, -2.0);
