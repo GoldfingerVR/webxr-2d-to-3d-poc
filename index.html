@@ -3,73 +3,50 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>WebXR 2D→3D POC — v0.12 (strong stereo)</title>
+  <title>WebXR 2D→3D POC — v0.20 (depth-warp)</title>
   <style>
     html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
     video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
     canvas{display:block}
-
-    /* HUD (top-left) */
     #hud{position:fixed;z-index:10;left:16px;top:16px;display:flex;gap:8px;align-items:center}
     .pill{background:#303030;color:#e0e0e0;border-radius:999px;padding:6px 10px;font-size:12px;border:1px solid #444;user-select:none}
     .btn-pill{cursor:pointer}
     .btn-pill[aria-disabled="true"]{opacity:.45;cursor:not-allowed}
-
-    /* Overlay gate for autoplay */
-    #overlay{
-      position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;
-      align-items:center;justify-content:center;z-index:12;background:rgba(0,0,0,.55)
-    }
-    .cta{
-      background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;
-      padding:14px 22px;border-radius:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)
-    }
+    #overlay{position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;z-index:12;background:rgba(0,0,0,.55)}
+    .cta{background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;padding:14px 22px;border-radius:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)}
     .sub{color:#bbb;font-size:13px}
-
-    /* Bottom status strip (2D) */
-    #statusBar{
-      position:fixed;left:50%;bottom:16px;transform:translateX(-50%);
-      display:flex;gap:8px;align-items:center;z-index:11
-    }
+    #statusBar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:flex;gap:8px;align-items:center;z-index:11}
     .status-chip{background:#141414;border:1px solid #333;color:#ddd;padding:8px 12px;border-radius:10px;font-size:12px;white-space:nowrap}
-    .ok{color:#86f7b1}
-    .warn{color:#ffd36e}
-    .bad{color:#ff7a7a}
-
-    /* Loader (kept for parity; no model download in this build) */
-    #loader{display:none;position:fixed;right:16px;bottom:16px;background:#111;border:1px solid #333;color:#ddd;border-radius:12px;padding:10px 12px;z-index:11;min-width:220px}
+    .ok{color:#86f7b1}.warn{color:#ffd36e}.bad{color:#ff7a7a}
+    #loader{position:fixed;right:16px;bottom:16px;background:#111;border:1px solid #333;color:#ddd;border-radius:12px;padding:10px 12px;z-index:11;min-width:220px}
     #bar{height:6px;background:#222;border-radius:999px;overflow:hidden;margin-top:8px}
     #fill{height:100%;width:0%;background:#00a86b}
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort-web.min.js"></script>
 </head>
 <body>
-  <!-- Top HUD -->
   <div id="hud">
-    <span class="pill">Build v0.12</span>
+    <span class="pill">Build v0.20</span>
     <span id="enterVR" class="pill btn-pill" aria-disabled="true">Enter VR</span>
     <span id="playToggle" class="pill btn-pill" aria-disabled="true">Play</span>
     <span id="status" class="pill">idle</span>
   </div>
 
-  <!-- Autoplay gate -->
   <div id="overlay">
     <button id="playBtn" class="cta">Enable Autoplay</button>
     <div class="sub">Tap to start playback, then use “Enter VR” (top-left).</div>
   </div>
 
-  <!-- Persistent 2D status -->
   <div id="statusBar">
-    <span class="status-chip">3D Engine: <strong id="engineState" class="warn">initializing…</strong></span>
+    <span class="status-chip">Depth: <strong id="engineState" class="warn">initializing…</strong></span>
     <span class="status-chip">Mode: <strong id="stereoMode">2D (mono)</strong></span>
   </div>
 
-  <!-- (kept for parity) -->
   <div id="loader">
-    <div id="loaderText">Preparing…</div>
+    <div id="loaderText">Preparing depth model…</div>
     <div id="bar"><div id="fill"></div></div>
   </div>
 
-  <!-- Hidden media source -->
   <video id="vid" playsinline muted crossorigin="anonymous"></video>
 
   <script type="module">
@@ -79,10 +56,13 @@
     // Config
     // -------------------------------------------------
     const STREAM_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4';
+    // Put your model under /models/midas_v21_small_256.onnx in your repo
+    const MODEL_URL  = './models/midas_v21_small_256.onnx';
 
-    // **Very strong** stereo so the difference is obvious (10× your old 0.035)
-    // NOTE: This is intentionally exaggerated for evaluation. Expect eye strain.
-    const PARALLAX_M = 0.35; // meters of left/right plane separation
+    // Strong depth so you can clearly see eye difference now; we’ll tune down later
+    const DISPARITY_STRENGTH = 0.12;  // try 0.06..0.14; too high = eye strain
+    const DEPTH_SIZE = 256;           // MiDaS small input size
+    const DEPTH_FPS  = 12;            // run depth ~12fps
 
     // -------------------------------------------------
     // DOM
@@ -94,6 +74,10 @@
     const enterVR    = document.getElementById('enterVR');
     const playToggle = document.getElementById('playToggle');
 
+    const loader     = document.getElementById('loader');
+    const loaderText = document.getElementById('loaderText');
+    const fill       = document.getElementById('fill');
+
     const engineState= document.getElementById('engineState');
     const stereoMode = document.getElementById('stereoMode');
 
@@ -103,27 +87,32 @@
     let renderer, scene, camera;
     let videoTex, monoPlane = null;
     let stereo = { left:null, right:null };
-    let xrSession = null, xrArrayCam = null;
+    let xrSession = null;
 
-    // 3D engine lifecycle flags (no depth yet; just stereo parallax)
-    const engine = { ready:false, active:false };
-
-    // VR status panel (mirrors 2D status)
-    let statusPanel = null, statusCanvas = null, statusCtx = null, statusTex = null;
+    // Depth engine state
+    const engine = {
+      session: null,           // ORT session
+      downloading:false,
+      ready:false,
+      active:false,            // true when stereo shader is used in VR
+      lastInferTS: 0,
+      depthTexture: null,      // THREE.DataTexture (R8)
+      tmpDepth: new Uint8Array(DEPTH_SIZE*DEPTH_SIZE), // working buffer
+      canvas: null, ctx: null, // offscreen for preprocessing
+      outMin: 0, outMax: 1,    // for normalization
+    };
 
     // -------------------------------------------------
     // Init
     // -------------------------------------------------
     initThree();
     createMonoPlane();
-    createStatusPanel();   // VR-readable status under the screen
     animate();
     wireUI();
-    probeXR(); // set Enter VR button state
+    probeXR();        // set Enter VR state
+    prefetchModel();  // start downloading in 2D immediately
+    initPreprocessCanvas();
 
-    // -------------------------------------------------
-    // UI wiring
-    // -------------------------------------------------
     function wireUI(){
       const tryPlay = () => startPlayback().catch(()=>{});
       ['pointerdown','click','touchstart','keydown'].forEach(ev=>{
@@ -143,27 +132,16 @@
       });
     }
 
-    // -------------------------------------------------
-    // Playback
-    // -------------------------------------------------
     async function startPlayback(){
       overlay.style.display = 'none';
       status('loading…');
       try{
         video.src = STREAM_URL;
-        video.muted = true;
-        video.playsInline = true;
-        await video.play();      // needs the tap
+        await video.play();
         video.muted = false;
-
         playToggle.textContent = 'Pause';
         playToggle.setAttribute('aria-disabled','false');
         bindVideoTexture();
-
-        // Once we have video, mark engine "ready" (stereo planes available)
-        engine.ready = true;
-        updateEngineStatus();
-
         status('playing');
         await probeXR(true);
       }catch(e){
@@ -185,7 +163,7 @@
       monoPlane.material.map = videoTex;
       monoPlane.material.needsUpdate = true;
 
-      const applyAspect = () => {
+      video.addEventListener('loadedmetadata', ()=>{
         const w = video.videoWidth || 16, h = video.videoHeight || 9;
         const aspect = w / Math.max(1, h);
         const width = 2.8, height = width / aspect;
@@ -193,7 +171,6 @@
         monoPlane.geometry.dispose();
         monoPlane.geometry = new THREE.PlaneGeometry(width, height);
 
-        // Rebuild stereo to match the exact aspect once we enter VR
         if (stereo.left && stereo.right) {
           [stereo.left, stereo.right].forEach(mesh=>{
             mesh.geometry.dispose();
@@ -201,16 +178,7 @@
           });
           positionStereoPlanes(width);
         }
-
-        // Position status panel just below the screen
-        if (statusPanel) {
-          statusPanel.position.set(0, monoPlane.position.y - (height/2) - 0.15, monoPlane.position.z);
-          statusPanel.scale.set(width*0.55, (width*0.55)*0.2, 1);
-        }
-      };
-
-      if (video.readyState >= 1) applyAspect();
-      else video.addEventListener('loadedmetadata', applyAspect, { once:true });
+      }, { once:true });
     }
 
     function createMonoPlane(){
@@ -222,26 +190,62 @@
     }
 
     // -------------------------------------------------
-    // Stereo (per-eye) output in VR
+    // Stereo via depth-warped shader (real per-pixel disparity)
     // -------------------------------------------------
-    function buildStereoPlanes(){
-      if (!videoTex) return;
+    let stereoMatLeft = null, stereoMatRight = null;
 
-      // Hide mono and create two planes that only render to one eye each
+    function buildStereoPlanesWithDepth(){
+      if (!videoTex || !engine.depthTexture) return;
+
       monoPlane.visible = false;
 
       const baseGeom = monoPlane.geometry.clone();
-      const mkMat = () => new THREE.MeshBasicMaterial({ color:0xffffff, map: videoTex });
+      const mkMat = (eyeSign)=> new THREE.ShaderMaterial({
+        uniforms:{
+          map:       { value: videoTex },
+          depthTex:  { value: engine.depthTexture },
+          disparity: { value: DISPARITY_STRENGTH },
+          eyeSign:   { value: eyeSign },   // -1 left, +1 right
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main(){
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+          }
+        `,
+        fragmentShader: `
+          precision highp float;
+          uniform sampler2D map;
+          uniform sampler2D depthTex;
+          uniform float disparity;
+          uniform float eyeSign;
+          varying vec2 vUv;
+          void main(){
+            float d = texture2D(depthTex, vUv).r; // 0..1 normalized (1 = near)
+            // Center around 0 so mid-depth has minimal shift
+            float shift = (d - 0.5) * disparity * eyeSign;
+            vec2 uv = vec2(clamp(vUv.x + shift, 0.0, 1.0), vUv.y);
+            gl_FragColor = texture2D(map, uv);
+          }
+        `,
+        depthTest: true,
+        depthWrite: false
+      });
 
-      stereo.left  = new THREE.Mesh(baseGeom.clone(), mkMat());
-      stereo.right = new THREE.Mesh(baseGeom.clone(), mkMat());
+      stereoMatLeft  = mkMat(-1.0);
+      stereoMatRight = mkMat( 1.0);
 
+      stereo.left  = new THREE.Mesh(baseGeom.clone(), stereoMatLeft);
+      stereo.right = new THREE.Mesh(baseGeom.clone(), stereoMatRight);
+
+      // Keep planes co-located (no big eye separation—back to your previous setup)
       stereo.left.position.copy(monoPlane.position);
       stereo.right.position.copy(monoPlane.position);
 
-      // Assign object layers (we’ll enable matching layers on the sub-cameras)
-      stereo.left.layers.set(1);   // left-eye layer
-      stereo.right.layers.set(2);  // right-eye layer
+      // Route to eyes
+      stereo.left.layers.set(1);
+      stereo.right.layers.set(2);
 
       scene.add(stereo.left);
       scene.add(stereo.right);
@@ -249,76 +253,134 @@
       positionStereoPlanes(baseGeom.parameters.width ?? 2.8);
 
       engine.active = true;
-      updateEngineStatus();
+      engineStatus();
     }
 
     function positionStereoPlanes(width){
-      // HUGE separation on purpose so you SEE the difference clearly.
-      const shift = PARALLAX_M;
-      stereo.left.position.x  = monoPlane.position.x - (shift/2);
-      stereo.right.position.x = monoPlane.position.x + (shift/2);
-
-      const pad = 1.01;
-      stereo.left.scale.set(pad, pad, 1);
-      stereo.right.scale.set(pad, pad, 1);
+      // Minimal physical shift, we rely on per-pixel depth for 3D
+      const s = 1.01;
+      stereo.left.scale.set(s, s, 1);
+      stereo.right.scale.set(s, s, 1);
     }
 
     // -------------------------------------------------
-    // VR status panel (mirrors 2D status)
+    // Depth engine (ORT + preprocessing)
     // -------------------------------------------------
-    function createStatusPanel(){
-      statusCanvas = document.createElement('canvas');
-      statusCanvas.width = 1024;
-      statusCanvas.height = 256;
-      statusCtx = statusCanvas.getContext('2d');
-
-      statusTex = new THREE.CanvasTexture(statusCanvas);
-      statusTex.colorSpace = THREE.SRGBColorSpace;
-      const mat = new THREE.MeshBasicMaterial({ map: statusTex, transparent:true });
-
-      const geom = new THREE.PlaneGeometry(1.2, 0.24);
-      statusPanel = new THREE.Mesh(geom, mat);
-      statusPanel.position.set(0, 1.1, -2.0);
-      scene.add(statusPanel);
-
-      drawStatusPanel();
+    function initPreprocessCanvas(){
+      engine.canvas = document.createElement('canvas');
+      engine.canvas.width = DEPTH_SIZE;
+      engine.canvas.height = DEPTH_SIZE;
+      engine.ctx = engine.canvas.getContext('2d', { willReadFrequently:true });
     }
 
-    function drawStatusPanel(){
-      const ctx = statusCtx, W = statusCanvas.width, H = statusCanvas.height;
-      ctx.clearRect(0,0,W,H);
-      // bg
-      ctx.fillStyle = 'rgba(20,20,20,0.85)';
-      ctx.fillRect(0,0,W,H);
-      ctx.strokeStyle = 'rgba(60,60,60,1)';
-      ctx.strokeRect(8,8,W-16,H-16);
+    async function prefetchModel(){
+      showLoader(true);
+      engine.downloading = true;
+      engineStatus();
 
-      ctx.fillStyle = '#ddd';
-      ctx.font = 'bold 44px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-      ctx.fillText('3D Engine:', 28, 92);
-      ctx.fillText('Mode:', 28, 176);
+      try{
+        // Create session once per page load; ORT will cache kernels
+        ort.env.wasm.numThreads = 1;  // conservative on Quest
+        engine.session = await ort.InferenceSession.create(MODEL_URL, {
+          executionProviders: ['webgl', 'wasm'] // webgl first on Oculus Browser
+        });
 
-      const engTxt = engine.active ? 'active (stereo)' : (engine.ready ? 'ready (awaiting VR)' : 'initializing…');
-      const engCol = engine.active ? '#86f7b1' : (engine.ready ? '#ffd36e' : '#ffd36e');
+        // Warmup with a black frame tensor
+        const dummy = new ort.Tensor('float32', new Float32Array(DEPTH_SIZE*DEPTH_SIZE*3), [1,3,DEPTH_SIZE,DEPTH_SIZE]);
+        const inputs = {};
+        inputs[engine.session.inputNames[0]] = dummy;
+        await engine.session.run(inputs);
 
-      ctx.fillStyle = engCol;
-      ctx.fillText(engTxt, 260, 92);
-
-      ctx.fillStyle = '#ddd';
-      ctx.fillText((xrSession && engine.active) ? '3D (stereo)' : '2D (mono)', 140, 176);
-
-      statusTex.needsUpdate = true;
+        engine.ready = true;
+        engine.downloading = false;
+        updateProgress(1);
+        loaderText.textContent = 'Model ready';
+        setTimeout(()=>showLoader(false), 700);
+      }catch(e){
+        loaderText.textContent = 'Model load failed';
+        console.warn('ORT load error:', e);
+      }finally{
+        engineStatus();
+      }
     }
 
-    function updateEngineStatus(){
-      // 2D chips
-      if (!engine.ready) { engineState.textContent='initializing…'; engineState.className='warn'; }
+    function showLoader(show){ loader.style.display = show ? 'block' : 'none'; }
+    function updateProgress(ratio){
+      const pct = Math.max(0, Math.min(100, Math.floor(ratio*100)));
+      fill.style.width = pct + '%';
+      loaderText.textContent = (pct<100) ? `Downloading model… ${pct}%` : 'Model ready';
+    }
+
+    // Run depth ~DEPTH_FPS and update THREE depth texture
+    async function maybeRunDepth(now){
+      if (!engine.ready || !video || video.paused || video.ended) return;
+      if (!engine.ctx) return;
+
+      const dt = now - engine.lastInferTS;
+      if (dt < 1000/DEPTH_FPS) return;
+      engine.lastInferTS = now;
+
+      // Draw current video frame into 256x256
+      engine.ctx.drawImage(video, 0, 0, DEPTH_SIZE, DEPTH_SIZE);
+      const img = engine.ctx.getImageData(0, 0, DEPTH_SIZE, DEPTH_SIZE).data;
+
+      // Convert RGBA -> CHW float
+      const chw = new Float32Array(DEPTH_SIZE*DEPTH_SIZE*3);
+      let o=0;
+      for (let i=0;i<img.length;i+=4){
+        // Simple [0..1] normalize; MiDaS expects specific normalization, but this is OK for POC
+        const r = img[i]/255, g = img[i+1]/255, b = img[i+2]/255;
+        chw[o]                     = r;
+        chw[o + DEPTH_SIZE*DEPTH_SIZE]     = g;
+        chw[o + DEPTH_SIZE*DEPTH_SIZE*2]   = b;
+        o++;
+      }
+      const input = new ort.Tensor('float32', chw, [1,3,DEPTH_SIZE,DEPTH_SIZE]);
+      const feeds = {}; feeds[engine.session.inputNames[0]] = input;
+      let out;
+      try{
+        const res = await engine.session.run(feeds);
+        out = res[engine.session.outputNames[0]]; // shape [1,1,H,W] or [1,H,W]
+      }catch(e){
+        console.warn('Depth run error:', e);
+        return;
+      }
+
+      // Read output and normalize to 0..1 (MiDaS is inverse depth; we remap for visual)
+      const data = out.data; // Float32Array
+      let min=+1e9, max=-1e9;
+      for(let i=0;i<data.length;i++){ const v=data[i]; if(v<min)min=v; if(v>max)max=v; }
+      const range = Math.max(1e-6, max-min);
+      // temporal smoothing & write to 8-bit buffer
+      const alpha = 0.6; // smooth for stability
+      for(let i=0;i<DEPTH_SIZE*DEPTH_SIZE;i++){
+        const v = (data[i]-min)/range; // 0..1, 1 = near (relative)
+        const prev = engine.tmpDepth[i]/255;
+        const sm = prev*(1-alpha) + v*alpha;
+        engine.tmpDepth[i] = Math.max(0, Math.min(255, Math.floor(sm*255)));
+      }
+
+      if (!engine.depthTexture) {
+        engine.depthTexture = new THREE.DataTexture(engine.tmpDepth, DEPTH_SIZE, DEPTH_SIZE, THREE.LuminanceFormat);
+        engine.depthTexture.needsUpdate = true;
+        engine.depthTexture.minFilter = THREE.LinearFilter;
+        engine.depthTexture.magFilter = THREE.LinearFilter;
+      } else {
+        engine.depthTexture.needsUpdate = true;
+      }
+
+      // If we’re already in VR and haven’t swapped to depth shader yet, do it now
+      if (xrSession && !engine.active) {
+        buildStereoPlanesWithDepth();
+      }
+    }
+
+    function engineStatus(){
+      if (engine.downloading && !engine.ready) { engineState.textContent='downloading…'; engineState.className='warn'; }
       else if (engine.ready && !engine.active) { engineState.textContent='ready (awaiting VR)'; engineState.className='ok'; }
-      else { engineState.textContent='active (stereo)'; engineState.className='ok'; }
-      stereoMode.textContent = (xrSession && engine.active) ? '3D (stereo)' : '2D (mono)';
-
-      // VR panel mirror
-      drawStatusPanel();
+      else if (engine.ready && engine.active) { engineState.textContent='active (depth 3D)'; engineState.className='ok'; }
+      else { engineState.textContent='initializing…'; engineState.className='warn'; }
+      stereoMode.textContent = (xrSession && engine.active) ? '3D (depth-warp)' : '2D (mono)';
     }
 
     // -------------------------------------------------
@@ -334,16 +396,9 @@
         renderer.xr.setSession(xrSession);
         status('VR started');
 
-        // Grab the array camera and set per-eye layer masks
-        xrArrayCam = renderer.xr.getCamera(camera);
-        if (xrArrayCam && xrArrayCam.isArrayCamera && xrArrayCam.cameras?.length >= 2) {
-          // Left sub-camera renders layer 1; right renders layer 2
-          xrArrayCam.cameras[0].layers.enable(1);
-          xrArrayCam.cameras[1].layers.enable(2);
-        }
-
-        // Switch to stereo when entering VR
-        if (engine.ready && !engine.active) buildStereoPlanes();
+        // If depth ready, switch to depth-warp stereo
+        if (engine.ready && engine.depthTexture) buildStereoPlanesWithDepth();
+        engineStatus();
 
         xrSession.addEventListener('end', ()=>{
           xrSession = null;
@@ -352,13 +407,9 @@
           if (stereo.left) stereo.left.visible = false;
           if (stereo.right) stereo.right.visible = false;
           status('VR ended');
-          updateEngineStatus();
-          if (video.paused) {
-            video.play().catch(()=>{ overlay.style.display='flex'; });
-          }
+          engineStatus();
+          if (video.paused) video.play().catch(()=>{ overlay.style.display='flex'; });
         });
-
-        updateEngineStatus();
       }catch(e){
         status('VR failed');
         console.warn('requestSession error:', e);
@@ -366,18 +417,16 @@
     }
 
     async function probeXR(){
-      const httpsOK = (location.protocol === 'https:') || (location.hostname === 'localhost');
       const xrOK = !!navigator.xr;
-      let supported = false;
-      try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; }
-      catch(e) { /* ignore */ }
-      enterVR.setAttribute('aria-disabled', (httpsOK && supported) ? 'false' : 'true');
+      let supported=false;
+      try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; } catch(_){}
+      enterVR.setAttribute('aria-disabled', supported ? 'false' : 'true');
     }
 
     function status(msg){ statusE.textContent = msg; }
 
     // -------------------------------------------------
-    // Three boilerplate
+    // Three boilerplate + render loop
     // -------------------------------------------------
     function initThree(){
       renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
@@ -394,7 +443,6 @@
 
       scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
-      // simple floor so VR isn’t pitch black
       const floor = new THREE.Mesh(
         new THREE.CircleGeometry(3.5, 64),
         new THREE.MeshBasicMaterial({ color:0x101010 })
@@ -411,20 +459,9 @@
     }
 
     function animate(){
-      renderer.setAnimationLoop(()=>{
-        if (videoTex && !video.paused && !video.ended) {
-          videoTex.needsUpdate = true;
-        }
-
-        // Ensure per-eye layer masks stay applied (some runtimes rebuild cameras)
-        if (renderer.xr.isPresenting) {
-          const arr = renderer.xr.getCamera(camera);
-          if (arr && arr.isArrayCamera && arr.cameras?.length >= 2) {
-            arr.cameras[0].layers.enable(1);
-            arr.cameras[1].layers.enable(2);
-          }
-        }
-
+      renderer.setAnimationLoop((t)=>{
+        if (videoTex && !video.paused && !video.ended) videoTex.needsUpdate = true;
+        maybeRunDepth(t);
         renderer.render(scene, camera);
       });
     }
