@@ -13,9 +13,11 @@
   #status{opacity:.85}
   #panel{position:fixed;right:16px;top:16px;display:flex;align-items:center;gap:8px;z-index:3}
   #panel label{color:#ddd;font-size:13px;display:flex;align-items:center;gap:6px}
+  /* Overlay no longer intercepts clicks (so Enter VR stays clickable) */
   #overlay{
     position:fixed;inset:0;display:none;flex-direction:column;gap:10px;
-    align-items:center;justify-content:center;z-index:4;background:rgba(0,0,0,.6)
+    align-items:center;justify-content:center;z-index:2;background:rgba(0,0,0,.45);
+    pointer-events:none;
   }
   #dlbox{width:min(520px,86vw);background:#151515;border:1px solid #333;border-radius:12px;padding:16px}
   #bar{height:10px;background:#2a2a2a;border-radius:999px;overflow:hidden}
@@ -29,7 +31,7 @@
 <body>
   <!-- Left HUD -->
   <div id="hud">
-    <span class="pill">Build v0.20</span>
+    <span class="pill">Build v0.30</span>
     <span id="enterVR" class="pill btn" aria-disabled="true">Enter VR</span>
     <span id="status" class="pill">idle</span>
   </div>
@@ -40,7 +42,7 @@
     <span class="pill">Video: sample MP4</span>
   </div>
 
-  <!-- Model download overlay -->
+  <!-- Non-blocking model overlay (also mirrored inside VR as 3D panel) -->
   <div id="overlay">
     <div id="dlbox">
       <div style="color:#e6e6e6;font-weight:700;margin-bottom:6px">Preparing 3D Depth (MiDaS Small)</div>
@@ -49,26 +51,22 @@
     </div>
   </div>
 
-  <!-- Hidden media source -->
+  <!-- Hidden media source and preproc canvas -->
   <video id="vid" playsinline muted crossorigin="anonymous"></video>
-  <!-- Hidden canvases for preprocessing -->
   <canvas id="cPre" width="256" height="256" style="position:fixed;left:-9999px;top:-9999px"></canvas>
 
   <div id="diag"></div>
 
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-    // ONNX Runtime Web (WASM backend)
     import 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js';
 
     // --------- CONFIG ----------
-    const STREAM_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-    // Your ONNX model is in repo at models/midas_v21_small_256.onnx (no placeholders)
-    const MODEL_URL  = 'models/midas_v21_small_256.onnx';
-    // Parallax strength (meters). Start small to avoid eye strain.
-    const PARALLAX   = 0.035;
-    // Infer every Nth frame and reuse between runs
-    const INFER_EVERY = 2; // run depth ~30fps video → ~15fps depth
+    const STREAM_URL   = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+    const MODEL_URL    = 'models/midas_v21_small_256.onnx';   // your repo file
+    const CACHE_NAME   = 'midas-small-v1';                    // bump to force re-download
+    const PARALLAX     = 0.032;                               // meters (small = comfortable)
+    const INFER_EVERY  = 2;                                   // run depth every N frames
 
     // ---------- DOM ----------
     const video    = document.getElementById('vid');
@@ -83,16 +81,16 @@
     const ctxPre   = cPre.getContext('2d', { willReadFrequently:true });
 
     // ---------- Three / XR ----------
-    let renderer, scene, camera;
-    let videoTex, depthTex, shaderLeft, shaderRight, quadLeft, quadRight, monoMesh;
-    let sessionXR = null;
-    let readyStereo = false;
+    let renderer, scene, camera, sessionXR=null;
+    let videoTex, depthTex, quadLeft, quadRight, monoMesh, shaderLeft, shaderRight;
+    let readyStereo=false;
 
     // Depth state
-    let ortSession = null;
-    let frameCount = 0;
-    let lastDepthImageData = null; // Uint8ClampedArray for grayscale
-    let depthW = 256, depthH = 256;
+    let ortSession=null, modelInputName='input';
+    let frameCount=0, lastDepthImageData=null, depthW=256, depthH=256;
+
+    // VR progress HUD
+    let vrHUD = null;
 
     initThree();
     createMonoPlane();
@@ -100,24 +98,19 @@
     animate();
     probeXR();
 
-    // UI logic
     function wireUI(){
       autoplay.addEventListener('change', async ()=>{
         if (autoplay.checked){
-          // Start playback muted to satisfy autoplay policies
           await startPlayback();
-          // Enable Enter VR after user consent
-          enterVR.setAttribute('aria-disabled', 'false');
+          enterVR.setAttribute('aria-disabled', (await canXR()) ? 'false':'true');
         }else{
-          // Stop playback + lock VR
           video.pause();
           enterVR.setAttribute('aria-disabled', 'true');
           status('autoplay disabled');
         }
       });
-
       enterVR.addEventListener('click', async ()=>{
-        if (enterVR.getAttribute('aria-disabled') === 'true') return;
+        if (enterVR.getAttribute('aria-disabled')==='true') return;
         await startXR();
       });
     }
@@ -130,8 +123,7 @@
         bindVideoTexture();
         status('playing (mono)');
       }catch(e){
-        status('autoplay blocked');
-        console.warn(e);
+        status('autoplay blocked'); console.warn(e);
       }
     }
 
@@ -147,92 +139,69 @@
       monoMesh.material.needsUpdate = true;
 
       video.addEventListener('loadedmetadata', ()=>{
-        const w = video.videoWidth || 16, h = video.videoHeight || 9;
-        const aspect = w / Math.max(1,h);
-        const width = 2.8, height = width / aspect;
-
+        const w = video.videoWidth||16, h = video.videoHeight||9;
+        const aspect = w/Math.max(1,h);
+        const width = 2.8, height = width/aspect;
         monoMesh.geometry.dispose();
-        monoMesh.geometry = new THREE.PlaneGeometry(width, height);
+        monoMesh.geometry = new THREE.PlaneGeometry(width,height);
       }, { once:true });
     }
 
     function createMonoPlane(){
-      const geom = new THREE.PlaneGeometry(2.8, 1.575);
-      const mat  = new THREE.MeshBasicMaterial({ color:0xffffff, transparent:false });
-      monoMesh = new THREE.Mesh(geom, mat);
-      monoMesh.position.set(0, 1.6, -2.0);
+      const geom = new THREE.PlaneGeometry(2.8,1.575);
+      const mat  = new THREE.MeshBasicMaterial({ color:0xffffff });
+      monoMesh = new THREE.Mesh(geom,mat);
+      monoMesh.position.set(0,1.6,-2.0);
       scene.add(monoMesh);
     }
 
-    // Build stereo quads with depth-aware shader
     function buildStereoWithShader(){
       if (!videoTex || !lastDepthImageData) return;
+      monoMesh.visible=false;
 
-      monoMesh.visible = false;
-
-      // Depth texture from last inference
       const depthData = new Uint8Array(lastDepthImageData.buffer.slice(0));
       depthTex = new THREE.DataTexture(depthData, depthW, depthH, THREE.LuminanceFormat);
-      depthTex.needsUpdate = true;
+      depthTex.needsUpdate=true;
 
       const width  = monoMesh.geometry.parameters.width;
       const height = monoMesh.geometry.parameters.height;
-      const geom = new THREE.PlaneGeometry(width, height);
+      const geom   = new THREE.PlaneGeometry(width,height);
 
-      const makeMat = (eyeSign) => new THREE.ShaderMaterial({
-        uniforms: {
-          uVideo: { value: videoTex },
-          uDepth: { value: depthTex },
-          uParallax: { value: PARALLAX * (eyeSign>0 ? 1 : -1) },
-          uAspectVideo: { value: width/height }
+      const makeMat = (eyeSign)=> new THREE.ShaderMaterial({
+        uniforms:{
+          uVideo:{value:videoTex},
+          uDepth:{value:depthTex},
+          uParallax:{value: PARALLAX*(eyeSign>0?1:-1)}
         },
-        vertexShader: `
-          varying vec2 vUv;
-          void main(){
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `,
-        fragmentShader: `
+        vertexShader:`varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+        fragmentShader:`
           precision highp float;
-          uniform sampler2D uVideo;
-          uniform sampler2D uDepth;
+          uniform sampler2D uVideo, uDepth;
           uniform float uParallax;
           varying vec2 vUv;
-          // Depth map is grayscale in [0,1]; treat 0 = far, 1 = near
           void main(){
-            float d = texture2D(uDepth, vUv).r;       // 0..1
-            // Center disparity so mid-depth ~0
-            float disp = (0.5 - d) * uParallax;       // near moves opposite sign
+            float d = texture2D(uDepth, vUv).r;      // 0..1
+            float disp = (0.5 - d) * uParallax;       // center disparity around mid-depth
             vec2 uv = vec2(vUv.x + disp, vUv.y);
-            vec4 col = texture2D(uVideo, uv);
-            gl_FragColor = col;
+            gl_FragColor = texture2D(uVideo, uv);
           }
         `,
-        depthTest: false,
-        depthWrite: false
+        depthTest:false, depthWrite:false
       });
 
       shaderLeft  = makeMat(-1);
       shaderRight = makeMat(+1);
-
       quadLeft  = new THREE.Mesh(geom.clone(), shaderLeft);
       quadRight = new THREE.Mesh(geom.clone(), shaderRight);
-
       quadLeft.position.copy(monoMesh.position);
       quadRight.position.copy(monoMesh.position);
-
-      // Eye masks
-      quadLeft.layers.set(1);
-      quadRight.layers.set(2);
-
-      scene.add(quadLeft);
-      scene.add(quadRight);
-      readyStereo = true;
+      quadLeft.layers.set(1);  // left eye
+      quadRight.layers.set(2); // right eye
+      scene.add(quadLeft); scene.add(quadRight);
+      readyStereo=true;
     }
 
     async function startXR(){
-      if (!navigator.xr) { status('WebXR not available'); return; }
       try{
         sessionXR = await navigator.xr.requestSession('immersive-vr', {
           requiredFeatures:['local-floor'],
@@ -241,99 +210,213 @@
         renderer.xr.setSession(sessionXR);
         status('VR started');
 
-        // Show model progress and load + init
-        overlay.style.display = 'flex';
-        const modelBytes = await fetchWithProgress(MODEL_URL, (p) => {
-          barInner.style.width = (p*100).toFixed(1)+'%';
-          msg.textContent = 'Downloading model… ' + (p*100).toFixed(1) + '%';
-        });
-        msg.textContent = 'Initializing depth engine…';
-        await initOrt(modelBytes);
-        msg.textContent = 'Model ready — enabling 3D.';
-        setTimeout(()=>{ overlay.style.display='none'; }, 400);
+        // show overlay (non-blocking) and in-VR HUD
+        showOverlay('Downloading model…');
+        createVRHud(); updateVRHud(0,'Downloading model…');
 
-        // Kick first inference immediately
+        // fetch from Cache first
+        const modelBytes = await getModelWithCache(MODEL_URL, (p)=>{
+          setProgress(p, 'Downloading model…');
+        });
+
+        setProgress(1, 'Initializing depth engine…');
+        await initOrt(modelBytes);
+        setProgress(1, 'Model ready — enabling 3D');
+        hideOverlay();
+        destroyVRHud();
+
+        // first inference + build stereo
         await runDepthOnce();
         buildStereoWithShader();
         status('VR 3D active');
+
         sessionXR.addEventListener('end', ()=>{
           status('VR ended');
-          // fall back to mono
-          if (quadLeft)  quadLeft.visible  = false;
-          if (quadRight) quadRight.visible = false;
-          monoMesh.visible = true;
+          if (quadLeft) quadLeft.visible=false;
+          if (quadRight) quadRight.visible=false;
+          monoMesh.visible=true;
         });
       }catch(e){
-        status('VR failed');
-        console.error(e);
+        status('VR failed'); console.error(e);
+        hideOverlay(); destroyVRHud();
       }
     }
 
-    async function initOrt(modelArrayBuffer){
-      // Prefer WASM backend
-      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
-      ortSession = await ort.InferenceSession.create(modelArrayBuffer, {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all'
-      });
+    // ---- Model caching with Cache Storage API ----
+    async function getModelWithCache(url, onProgress){
+      try{
+        const cache = await caches.open(CACHE_NAME);
+        let res = await cache.match(url);
+        if (res){
+          // Return cached bytes (no progress possible)
+          onProgress && onProgress(1);
+          return await (await res.blob()).arrayBuffer();
+        }
+        // Fetch with progress and then cache it
+        const ab = await fetchWithProgress(url, onProgress);
+        await cache.put(url, new Response(ab, { headers:{ 'Content-Type':'application/octet-stream' } }));
+        return ab;
+      }catch(err){
+        console.warn('Cache API failed, falling back to direct fetch', err);
+        return await fetchWithProgress(url, onProgress);
+      }
     }
 
-    // Download with progress (works on GitHub Pages if Content-Length is present)
+    // Progress-aware fetch (handles unknown lengths)
     async function fetchWithProgress(url, onProgress){
       const res = await fetch(url);
       const len = +res.headers.get('Content-Length') || 0;
+      if (!res.body || !res.ok){
+        // fallback: just read all
+        const ab = await res.arrayBuffer();
+        onProgress && onProgress(1);
+        return ab;
+      }
       const reader = res.body.getReader();
-      let received = 0;
-      const chunks = [];
+      let received=0; const chunks=[];
       for(;;){
-        const { done, value } = await reader.read();
+        const {done, value} = await reader.read();
         if (done) break;
-        chunks.push(value);
-        received += value.byteLength;
+        chunks.push(value); received += value.byteLength;
         if (len && onProgress) onProgress(received/len);
       }
       const blob = new Blob(chunks);
+      onProgress && onProgress(1);
       return await blob.arrayBuffer();
     }
 
-    // Depth inference for current video frame → updates lastDepthImageData
+    // ---- ORT init (robust for Oculus Browser) ----
+    async function initOrt(modelArrayBuffer){
+      // Ensure wasm path & conservative threading for broader compatibility
+      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+      const opts = {
+        executionProviders:['wasm'],
+        graphOptimizationLevel:'all',
+        intraOpNumThreads: 1
+      };
+      // Create session from bytes
+      ortSession = await ort.InferenceSession.create(modelArrayBuffer, opts);
+      // Auto-detect model input name
+      const names = ortSession.inputNames;
+      if (names && names.length) modelInputName = names[0];
+    }
+
+    function showOverlay(text){ overlay.style.display='flex'; if (text) msg.textContent=text; }
+    function hideOverlay(){ overlay.style.display='none'; }
+    function setProgress(p, text){
+      barInner.style.width = (Math.max(0,Math.min(1,p))*100).toFixed(1)+'%';
+      if (text) msg.textContent = text + (p>=0 && p<=1 ? ` ${ (p*100).toFixed(1)}%` : '');
+      updateVRHud(p, text);
+    }
+
+    // Simple VR progress HUD (3D)
+    function createVRHud(){
+      if (vrHUD) return;
+      const group = new THREE.Group();
+
+      // panel
+      const panel = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.7, 0.18),
+        new THREE.MeshBasicMaterial({ color:0x111111 })
+      );
+      panel.position.set(0, 1.35, -1.3);
+      group.add(panel);
+
+      // bar bg
+      const barBG = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.62, 0.02),
+        new THREE.MeshBasicMaterial({ color:0x333333 })
+      );
+      barBG.position.set(0, 1.34, -1.29);
+      group.add(barBG);
+
+      // bar fill (scale X)
+      const barFill = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.62, 0.02),
+        new THREE.MeshBasicMaterial({ color:0x00a86b })
+      );
+      barFill.position.set(-0.31, 1.34, -1.28);
+      barFill.scale.set(0.0001, 1, 1);
+      group.add(barFill);
+
+      // label (canvas texture)
+      const labelCanvas = document.createElement('canvas');
+      labelCanvas.width = 512; labelCanvas.height = 64;
+      const lctx = labelCanvas.getContext('2d');
+      const tex = new THREE.CanvasTexture(labelCanvas);
+      tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
+      const label = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.62, 0.06),
+        new THREE.MeshBasicMaterial({ map: tex, transparent:true })
+      );
+      label.position.set(0, 1.39, -1.29);
+      group.add(label);
+
+      group.userData = { barFill, labelCanvas, lctx, tex };
+      scene.add(group);
+      vrHUD = group;
+      updateVRHud(0,'Downloading model…');
+    }
+
+    function updateVRHud(p, text){
+      if (!vrHUD) return;
+      const { barFill, labelCanvas, lctx, tex } = vrHUD.userData;
+      const clamped = Math.max(0, Math.min(1, (Number.isFinite(p)?p:0)));
+      const widthFull = 0.62;
+      const newWidth = Math.max(0.001, widthFull*clamped);
+      barFill.scale.set(clamped, 1, 1);
+      barFill.position.x = -widthFull/2 + newWidth/2;
+
+      lctx.clearRect(0,0,labelCanvas.width,labelCanvas.height);
+      lctx.fillStyle = '#cccccc';
+      lctx.font = '28px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+      lctx.textAlign = 'center'; lctx.textBaseline = 'middle';
+      const t = text ? `${text} ${Number.isFinite(p)?(p*100).toFixed(0)+'%':''}` : '';
+      lctx.fillText(t, labelCanvas.width/2, labelCanvas.height/2);
+      tex.needsUpdate = true;
+    }
+
+    function destroyVRHud(){
+      if (!vrHUD) return;
+      scene.remove(vrHUD);
+      vrHUD.traverse(obj=>{
+        if (obj.material?.map?.dispose) obj.material.map.dispose();
+        if (obj.material?.dispose) obj.material.dispose();
+        if (obj.geometry?.dispose) obj.geometry.dispose();
+      });
+      vrHUD=null;
+    }
+
+    // ---- Depth inference ----
     async function runDepthOnce(){
-      // Draw video frame into 256x256 canvas
+      if (!ortSession) return;
       ctxPre.drawImage(video, 0, 0, 256, 256);
       const img = ctxPre.getImageData(0,0,256,256);
-      // Convert RGBA to float32 RGB normalized
       const src = img.data;
       const chw = new Float32Array(256*256*3);
-      let p = 0;
+      let p=0;
       for (let i=0;i<src.length;i+=4){
-        chw[p++] = src[i]   / 255; // R
-        chw[p++] = src[i+1] / 255; // G
-        chw[p++] = src[i+2] / 255; // B
+        chw[p++] = src[i]/255;     // R
+        chw[p++] = src[i+1]/255;   // G
+        chw[p++] = src[i+2]/255;   // B
       }
-      // MiDaS small expects NCHW [1,3,256,256]
       const tensor = new ort.Tensor('float32', chw, [1,3,256,256]);
-      const out = await ortSession.run({ input: tensor }); // input name 'input' works for many MiDaS small ONNX exports
-      // Get first (and only) output
+
+      // Auto-detected input name
+      const feeds = {}; feeds[modelInputName] = tensor;
+      const out = await ortSession.run(feeds);
       const outName = Object.keys(out)[0];
-      const depth = out[outName].data; // Float32Array, shape [1,1,H,W] or [1,H,W]
-      // Convert to 0..255 grayscale
-      // Find min/max
-      let mn = Infinity, mx = -Infinity;
-      for (let i=0;i<depth.length;i++){ const v = depth[i]; if (v<mn) mn=v; if (v>mx) mx=v; }
+      const depth = out[outName].data;
+
+      // Normalize → 8-bit grayscale
+      let mn=Infinity, mx=-Infinity;
+      for (let i=0;i<depth.length;i++){ const v=depth[i]; if (v<mn) mn=v; if (v>mx) mx=v; }
       const range = Math.max(1e-6, mx-mn);
       const N = depth.length;
       const gray = new Uint8ClampedArray(N);
-      for (let i=0;i<N;i++){
-        const n = (depth[i]-mn)/range; // 0..1
-        gray[i] = Math.max(0, Math.min(255, Math.round(n*255)));
-      }
-      // Store for texture update
-      lastDepthImageData = gray;
-      depthW = 256; depthH = 256;
-      if (depthTex){
-        depthTex.image.data = new Uint8Array(gray.buffer.slice(0));
-        depthTex.needsUpdate = true;
-      }
+      for (let i=0;i<N;i++){ gray[i] = Math.round(((depth[i]-mn)/range)*255); }
+      lastDepthImageData = gray; depthW=256; depthH=256;
+      if (depthTex){ depthTex.image.data = new Uint8Array(gray.buffer.slice(0)); depthTex.needsUpdate=true; }
     }
 
     // ---------- Three boilerplate ----------
@@ -367,16 +450,18 @@
       });
     }
 
+    async function canXR(){
+      if (!('xr' in navigator)) return false;
+      try{ return await navigator.xr.isSessionSupported('immersive-vr'); }
+      catch{ return false; }
+    }
     async function probeXR(){
-      const httpsOK = (location.protocol === 'https:') || (location.hostname === 'localhost');
-      const xrOK = !!navigator.xr;
-      let supported = false;
-      try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; }
-      catch(e) {}
-      enterVR.setAttribute('aria-disabled', (httpsOK && supported) ? 'false' : 'true');
+      const httpsOK = (location.protocol==='https:')||(location.hostname==='localhost');
+      const supported = httpsOK && await canXR();
+      enterVR.setAttribute('aria-disabled', supported?'false':'true');
       diag.textContent =
         `https/localhost: ${httpsOK}\n`+
-        `navigator.xr: ${xrOK}\n`+
+        `navigator.xr: ${!!navigator.xr}\n`+
         `immersive-vr supported: ${supported}`;
     }
 
@@ -384,19 +469,13 @@
 
     function animate(){
       renderer.setAnimationLoop(async ()=>{
-        if (videoTex && !video.paused && !video.ended) {
-          videoTex.needsUpdate = true;
-        }
-        // Run depth periodically once model is ready
+        if (videoTex && !video.paused && !video.ended) videoTex.needsUpdate = true;
         if (sessionXR && ortSession && (frameCount++ % INFER_EVERY === 0)){
-          try{
-            await runDepthOnce();
-          }catch(e){ /* keep rendering even if a frame fails */ }
+          try{ await runDepthOnce(); }catch(e){ /* keep going */ }
         }
         renderer.render(scene, camera);
       });
     }
   </script>
-
 </body>
 </html>
