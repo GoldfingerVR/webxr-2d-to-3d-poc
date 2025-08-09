@@ -3,137 +3,90 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>WebXR 2D→3D POC — v0.12</title>
+  <title>WebXR 2D → Stereo POC — v0.13 (no proxy)</title>
+
+  <!-- hls.js for .m3u8 playback in browsers without native HLS -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
+
+  <!-- Three.js (module) -->
+  <script type="module" src="https://unpkg.com/three@0.160.0/build/three.module.js"></script>
+
   <style>
     html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
     video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
     canvas{display:block}
 
-    /* HUD (top-left) */
-    #hud{position:fixed;z-index:10;left:16px;top:16px;display:flex;gap:8px;align-items:center}
-    .pill{background:#303030;color:#e0e0e0;border-radius:999px;padding:6px 10px;font-size:12px;border:1px solid #444;user-select:none}
-    .btn-pill{cursor:pointer}
+    #hud{position:fixed;z-index:3;left:16px;top:16px;display:flex;gap:8px;align-items:center}
+    .pill{background:#303030;color:#e0e0e0;border-radius:999px;padding:6px 10px;font-size:12px;border:1px solid #444}
+    .btn-pill{cursor:pointer;user-select:none}
     .btn-pill[aria-disabled="true"]{opacity:.45;cursor:not-allowed}
+    #status{opacity:.85}
 
-    /* Overlay gate for autoplay */
     #overlay{
       position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;
-      align-items:center;justify-content:center;z-index:12;background:rgba(0,0,0,.55)
+      align-items:center;justify-content:center;z-index:4;background:rgba(0,0,0,.55)
     }
     .cta{
       background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;
       padding:14px 22px;border-radius:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)
     }
-    .sub{color:#bbb;font-size:13px}
+    .hint{color:#bbb;font-size:13px;text-align:center}
 
-    /* Bottom status strip (always visible, also in VR as quad text) */
-    #statusBar{
-      position:fixed;left:50%;bottom:16px;transform:translateX(-50%);
-      display:flex;gap:8px;align-items:center;z-index:11
-    }
-    .status-chip{background:#141414;border:1px solid #333;color:#ddd;padding:8px 12px;border-radius:10px;font-size:12px;white-space:nowrap}
-    .ok{color:#86f7b1}
-    .warn{color:#ffd36e}
-    .bad{color:#ff7a7a}
-
-    /* Progress panel (pre-download the model) */
-    #loader{
-      position:fixed;right:16px;bottom:16px;background:#111;border:1px solid #333;color:#ddd;
-      border-radius:12px;padding:10px 12px;z-index:11;min-width:220px
-    }
-    #bar{height:6px;background:#222;border-radius:999px;overflow:hidden;margin-top:8px}
-    #fill{height:100%;width:0%;background:#00a86b}
+    #diag{position:fixed;left:12px;bottom:12px;color:#aaa;font-size:12px;white-space:pre-line;z-index:3;max-width:92vw}
   </style>
 </head>
 <body>
-  <!-- Top HUD -->
+  <!-- HUD -->
   <div id="hud">
-    <span class="pill">Build v0.12</span>
+    <span class="pill">Build v0.13</span>
     <span id="enterVR" class="pill btn-pill" aria-disabled="true">Enter VR</span>
-    <span id="playToggle" class="pill btn-pill" aria-disabled="true">Play</span>
     <span id="status" class="pill">idle</span>
   </div>
 
   <!-- Autoplay gate -->
-  <div id="overlay">
+  <div id="overlay" aria-hidden="false">
     <button id="playBtn" class="cta">Enable Autoplay</button>
-    <div class="sub">Tap to start playback, then use “Enter VR” (top-left).</div>
-  </div>
-
-  <!-- Persistent 3D status -->
-  <div id="statusBar">
-    <span class="status-chip">3D Engine: <strong id="engineState" class="warn">initializing…</strong></span>
-    <span class="status-chip">Mode: <strong id="stereoMode">2D (mono)</strong></span>
-  </div>
-
-  <!-- Model loader/progress -->
-  <div id="loader">
-    <div id="loaderText">Preparing depth model…</div>
-    <div id="bar"><div id="fill"></div></div>
+    <div class="hint">Tap once to start playback, then use “Enter VR” (top-left).</div>
   </div>
 
   <!-- Hidden media source -->
   <video id="vid" playsinline muted crossorigin="anonymous"></video>
 
+  <!-- Debug -->
+  <div id="diag"></div>
+
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
 
-    // -------------------------------------------------
-    // Config
-    // -------------------------------------------------
-    const STREAM_URL = 'https://aps13.playlist.ttvnw.net/v1/playlist/CroGdx8CyTiO8JfGjv-zArDw93tQKeFhr4UGsh34Tb_6Lcgp9kG7ytlTP96cO-EiZ-I06VJgNkhTD4uzuiJk7938GYD4rpCe7jrhbAg6QwcYUVIIlmXvS5q6V7tJYKJLy2lULxYvbyQPJVIM6J1qwJC6NMftTP0rxnsOoMJFNG4043-cG84uBMgHjA6BZ2IDzFGV1fni1_9dVOd9XxJi7IhWG_0h_WsC0j6tPuP1JTP4LPN5hh0TKNk7UrAq9xk02qyaQb4kq6682mNQFyIccHSpQWyUkPkpuBoAa0gQjnmIyJJqqDx1-zKYZw56r7-OU2NoYXC8AHzpHMnk6GOrB6P2EtFvL2ssler1Wqe-kPojHH9nk2hSVSRuZ46wXHuQKkYI8vtH03sxwt7ArmRowW7bC4TLF3f4RoDVg_uVWzqDtrpTEsTmTMCag-YNySyN3LBLlyYr2jTqNQ7f-rf7T8ShtxKfoUngz-CAci6eqd0LskmqLaTVrtgImltGk2-XUqgYQviziHBJIYvQBXQZASIIVJAgqDUVgatECPYZi68szLYv5juAq4L4Aq-_2yN-X32EdyHyMwOA65xm7tu593ACoGo-0V_bbu1QNQCG0sKBCR2HOeReqE9bhK86LvZ1NpAPen8RVKEM8giwy8mkzmFtq-CSWL16ZTu-7w2DCBZi4adh60O0DAmrUIFDHAHNCfuqhbJQ5nph8gfpjdfy-kylDQVARXXBJrNv0jb6vmRcO0Lv8IzgNy4sn1SzK1FnauwkYpeYFJmXUSe5N06FnRJgXVf4ZcE0-5DDrHjUP1AbTm5W4Lg5kBd-Q7Sc5rsejt1FGz8cKLJHMiYWoiu-M5eMNh1_tWH6S_8uL5AdbmOXqwWvQEQNVAbwfh7LKIvqWkDjfL5G5Op5VQYRd-6ZU3SmzPKdTYPO3F5kRwv0uZ8VmR190KjTakLVaz9sHlbeYHeaZ07u_aCkgsIonT3DFziyzrrftaS_6QOOttI0SQVCX0Fu2bCc0Z1hgdLjryq0Agj9JwbMQsHW7prL4ndDDo7wDtgX5LGwT8VCbs9S0euASrXljDAYHdVsiNOJEmXDllZJ8Q2fme7-HJacvhoMffrb2WRLQ5Ye3J-hIAEqCWV1LXdlc3QtMjD6DA.m3u8';
-    // If your model is hosted via GitHub Pages at /models/midas_v21_small_256.onnx, you can keep this relative path
-    const MODEL_URL  = './models/midas_v21_small_256.onnx';
+    // ---------- Config ----------
+    // Provide your HLS or MP4 via ?u=... (no proxy needed)
+    const q = new URLSearchParams(location.search);
+    const STREAM_URL = q.get('u') || 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
 
-    // Parallax strength for stereo planes (meters)
+    // Inter-ocular separation in meters (keep small to avoid eyestrain)
     const PARALLAX_M = 0.035;
 
-    // -------------------------------------------------
-    // DOM
-    // -------------------------------------------------
-    const video      = document.getElementById('vid');
-    const playBtn    = document.getElementById('playBtn');
-    const overlay    = document.getElementById('overlay');
-    const statusE    = document.getElementById('status');
-    const enterVR    = document.getElementById('enterVR');
-    const playToggle = document.getElementById('playToggle');
+    // ---------- DOM ----------
+    const video   = document.getElementById('vid');
+    const playBtn = document.getElementById('playBtn');
+    const overlay = document.getElementById('overlay');
+    const statusE = document.getElementById('status');
+    const enterVR = document.getElementById('enterVR');
+    const diag    = document.getElementById('diag');
 
-    const loader     = document.getElementById('loader');
-    const loaderText = document.getElementById('loaderText');
-    const fill       = document.getElementById('fill');
-
-    const engineState= document.getElementById('engineState');
-    const stereoMode = document.getElementById('stereoMode');
-
-    // -------------------------------------------------
-    // Three / XR state
-    // -------------------------------------------------
+    // ---------- Three / XR ----------
     let renderer, scene, camera;
     let videoTex, monoPlane = null;
     let stereo = { left:null, right:null };
     let xrSession = null;
 
-    // 3D engine lifecycle flags
-    const engine = {
-      downloading:false,
-      ready:false,
-      active:false, // true when we are in VR and stereo planes are showing
-      cacheKey:'depth-model-midas-v21-small-256'
-    };
-
-    // -------------------------------------------------
-    // Init
-    // -------------------------------------------------
     initThree();
-    createMonoPlane();
+    createMonoPlane();  // placeholder until we build stereo
     animate();
     wireUI();
-    probeXR(); // just to set the Enter VR button state
-    prefetchModel(); // start downloading the model immediately in 2D
+    probeXR();          // enable/disable Enter VR
 
-    // -------------------------------------------------
-    // UI wiring
-    // -------------------------------------------------
+    // ---------- UI wiring ----------
     function wireUI(){
       const tryPlay = () => startPlayback().catch(()=>{});
       ['pointerdown','click','touchstart','keydown'].forEach(ev=>{
@@ -141,37 +94,60 @@
       });
       playBtn.addEventListener('click', tryPlay);
 
-      playToggle.addEventListener('click', async ()=>{
-        if (playToggle.getAttribute('aria-disabled')==='true') return;
-        if (video.paused) { await video.play().catch(()=>{}); playToggle.textContent='Pause'; }
-        else { video.pause(); playToggle.textContent='Play'; }
-      });
-
       enterVR.addEventListener('click', async ()=>{
-        if (enterVR.getAttribute('aria-disabled')==='true') return;
+        if (enterVR.getAttribute('aria-disabled') === 'true') {
+          log('Enter VR pressed but XR unsupported (still trying)…');
+          return;
+        }
         await startXR();
       });
     }
 
-    // -------------------------------------------------
-    // Playback
-    // -------------------------------------------------
+    // ---------- Playback ----------
+    function isHls(url){ return /\.m3u8(\?|$)/i.test(url); }
+
     async function startPlayback(){
       overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden','true');
       status('loading…');
+
       try{
-        video.src = STREAM_URL;
-        await video.play();            // requires gesture
-        video.muted = false;           // safe to unmute after gesture
-        playToggle.textContent = 'Pause';
-        playToggle.setAttribute('aria-disabled','false');
+        video.muted = true;           // required for gesture-autoplay on mobile/VR
+        video.playsInline = true;
+        video.crossOrigin = 'anonymous';
+
+        if (isHls(STREAM_URL) && window.Hls && Hls.isSupported()) {
+          const hls = new Hls({
+            enableWorker: true,
+            lowLatencyMode: true,
+            backBufferLength: 30,
+            liveSyncDuration: 3
+          });
+          hls.on(Hls.Events.ERROR, (_, data) => {
+            console.warn('[hls.js] error', data);
+            status('hls error');
+            log('hls.js: ' + (data?.details || 'error'));
+          });
+          hls.loadSource(STREAM_URL);
+          hls.attachMedia(video);
+        } else {
+          // Native HLS (iOS/Safari) or MP4 fallback
+          video.src = STREAM_URL;
+        }
+
+        await video.play();           // needs the user gesture we just got
+        video.muted = false;          // safe to unmute now
+
         bindVideoTexture();
+        buildStereoPlanes();          // switch from mono to stereo planes
+
         status('playing');
-        await probeXR(true);           // recheck XR after gesture
+        await probeXR(true);
       }catch(e){
         status('playback blocked');
         overlay.style.display = 'flex';
-        console.warn('play() error:', e);
+        overlay.setAttribute('aria-hidden','false');
+        log('play() error: ' + (e?.message || e));
         throw e;
       }
     }
@@ -187,7 +163,7 @@
       monoPlane.material.map = videoTex;
       monoPlane.material.needsUpdate = true;
 
-      // keep correct aspect
+      // Keep screen geometry in the right aspect as soon as metadata is available
       video.addEventListener('loadedmetadata', ()=>{
         const w = video.videoWidth || 16, h = video.videoHeight || 9;
         const aspect = w / Math.max(1, h);
@@ -206,20 +182,18 @@
       }, { once:true });
     }
 
+    // ---------- Scene ----------
     function createMonoPlane(){
-      const geom = new THREE.PlaneGeometry(2.8, 1.575);
+      const geom = new THREE.PlaneGeometry(2.8, 1.575); // gets corrected on metadata
       const mat  = new THREE.MeshBasicMaterial({ color:0xffffff });
       monoPlane = new THREE.Mesh(geom, mat);
       monoPlane.position.set(0, 1.6, -2.0);
       scene.add(monoPlane);
     }
 
-    // -------------------------------------------------
-    // Stereo (parallax) output in VR
-    // -------------------------------------------------
+    // Simple stereo: two planes sharing the same video texture, tiny x-shift per eye
     function buildStereoPlanes(){
       if (!videoTex) return;
-
       monoPlane.visible = false;
 
       const baseGeom = monoPlane.geometry.clone();
@@ -228,22 +202,18 @@
       stereo.left  = new THREE.Mesh(baseGeom.clone(), mkMat());
       stereo.right = new THREE.Mesh(baseGeom.clone(), mkMat());
 
-      // same position, slight X shift per eye
-      stereo.left.position.copy(monoPlane.position);
-      stereo.right.position.copy(monoPlane.position);
+      stereo.left.position.set(monoPlane.position.x, monoPlane.position.y, monoPlane.position.z);
+      stereo.right.position.set(monoPlane.position.x, monoPlane.position.y, monoPlane.position.z);
 
-      // 1 = left eye, 2 = right eye
+      // layer masks: 1 = left, 2 = right
       stereo.left.layers.set(1);
       stereo.right.layers.set(2);
 
       scene.add(stereo.left);
       scene.add(stereo.right);
 
-      positionStereoPlanes(baseGeom.parameters.width ?? 2.8);
-
-      // Mark engine “active” when we actually show stereo in VR
-      engine.active = true;
-      engineStatus();
+      const width = baseGeom.parameters.width ?? 2.8;
+      positionStereoPlanes(width);
     }
 
     function positionStereoPlanes(width){
@@ -251,89 +221,15 @@
       stereo.left.position.x  = monoPlane.position.x - (shift/2);
       stereo.right.position.x = monoPlane.position.x + (shift/2);
 
-      // small scale pad to avoid edge seams
-      const s = 1.01;
-      stereo.left.scale.set(s, s, 1);
-      stereo.right.scale.set(s, s, 1);
+      // small scale pad to hide binocular edges
+      const scalePad = 1.01;
+      stereo.left.scale.set(scalePad, scalePad, 1);
+      stereo.right.scale.set(scalePad, scalePad, 1);
     }
 
-    // -------------------------------------------------
-    // Depth “engine” (pre-download + cache; we still use parallax in this POC)
-    // -------------------------------------------------
-    async function prefetchModel(){
-      // show progress UI even in 2D
-      showLoader(true);
-      engine.downloading = true;
-      engineStatus();
-
-      try{
-        const buf = await fetchWithProgress(MODEL_URL, (ratio)=>updateProgress(ratio));
-        // Cache in memory for session; in a real build you’d also use CacheStorage/IDB
-        window.__DEPTH_MODEL__ = buf;
-        engine.ready = true;
-        engine.downloading = false;
-        updateProgress(1);
-        loaderText.textContent = 'Model ready';
-        setTimeout(()=>showLoader(false), 1000);
-      }catch(e){
-        loaderText.textContent = 'Download failed';
-        console.warn('Model download failed:', e);
-        // keep loader visible with failed state; user can still use VR parallax
-      }finally{
-        engineStatus();
-      }
-    }
-
-    function showLoader(show){
-      loader.style.display = show ? 'block' : 'none';
-    }
-    function updateProgress(ratio){
-      const pct = Math.max(0, Math.min(100, Math.floor(ratio*100)));
-      fill.style.width = pct + '%';
-      loaderText.textContent = (pct<100) ? `Downloading model… ${pct}%` : 'Model ready';
-    }
-
-    async function fetchWithProgress(url, onProgress){
-      const res = await fetch(url, { cache:'force-cache' });
-      if (!res.ok) throw new Error('HTTP '+res.status);
-      const total = Number(res.headers.get('Content-Length')) || 0;
-      const reader = res.body.getReader();
-      let received = 0;
-      const chunks = [];
-      while(true){
-        const {done, value} = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.byteLength;
-        if (total) onProgress(received/total);
-      }
-      const blob = new Blob(chunks);
-      return await blob.arrayBuffer();
-    }
-
-    function engineStatus(){
-      // Human-readable engine + stereo state
-      if (engine.downloading && !engine.ready) {
-        engineState.textContent = 'downloading…';
-        engineState.className = 'warn';
-      } else if (engine.ready && !engine.active) {
-        engineState.textContent = 'ready (awaiting VR)';
-        engineState.className = 'ok';
-      } else if (engine.ready && engine.active) {
-        engineState.textContent = 'active (stereo)';
-        engineState.className = 'ok';
-      } else {
-        engineState.textContent = 'initializing…';
-        engineState.className = 'warn';
-      }
-      stereoMode.textContent = (xrSession && engine.active) ? '3D (stereo)' : '2D (mono)';
-    }
-
-    // -------------------------------------------------
-    // WebXR
-    // -------------------------------------------------
+    // ---------- WebXR ----------
     async function startXR(){
-      if (!navigator.xr) { status('WebXR not available'); return; }
+      if (!navigator.xr) { status('WebXR not available'); log('navigator.xr is undefined'); return; }
       try{
         xrSession = await navigator.xr.requestSession('immersive-vr', {
           requiredFeatures: ['local-floor'],
@@ -342,25 +238,23 @@
         renderer.xr.setSession(xrSession);
         status('VR started');
 
-        // Switch to stereo when in VR and engine is “ready”
-        if (engine.ready && !engine.active) buildStereoPlanes(); // use parallax stereo
-        engineStatus();
+        // Make sure each eye renders only its plane
+        const xrCam = renderer.xr.getCamera(camera);
+        if (xrCam && xrCam.cameras && xrCam.cameras.length >= 2) {
+          xrCam.cameras[0].layers.set(1); // left eye
+          xrCam.cameras[1].layers.set(2); // right eye
+        }
 
         xrSession.addEventListener('end', ()=>{
-          xrSession = null;
-          engine.active = false; // back to mono in 2D
-          monoPlane.visible = true;
-          if (stereo.left) stereo.left.visible = false;
-          if (stereo.right) stereo.right.visible = false;
           status('VR ended');
-          engineStatus();
+          // Keep overlay hidden; allow re-entry; continue playing in 2D if possible
           if (video.paused) {
-            video.play().catch(()=>{ overlay.style.display='flex'; });
+            video.play().catch(()=>{ /* ignore */ });
           }
         });
       }catch(e){
         status('VR failed');
-        console.warn('requestSession error:', e);
+        log('requestSession error: ' + (e?.message || e));
       }
     }
 
@@ -369,15 +263,22 @@
       const xrOK = !!navigator.xr;
       let supported = false;
       try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; }
-      catch(e) { /* ignore */ }
+      catch(e) { log('isSessionSupported threw: ' + e); }
+
+      diag.textContent =
+        `URL: ${STREAM_URL}\n`+
+        `Secure (https/localhost): ${httpsOK}\n`+
+        `navigator.xr present: ${xrOK}\n`+
+        `'immersive-vr' supported: ${supported}`+
+        (afterGesture ? `\n(rechecked after user gesture)` : '');
+
       enterVR.setAttribute('aria-disabled', supported ? 'false' : 'true');
     }
 
     function status(msg){ statusE.textContent = msg; }
+    function log(msg){ diag.textContent += (diag.textContent ? '\n' : '') + msg; }
 
-    // -------------------------------------------------
-    // Three boilerplate
-    // -------------------------------------------------
+    // ---------- Three boilerplate ----------
     function initThree(){
       renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
       renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -393,7 +294,7 @@
 
       scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
-      // simple floor so VR isn’t pitch black
+      // simple floor for orientation
       const floor = new THREE.Mesh(
         new THREE.CircleGeometry(3.5, 64),
         new THREE.MeshBasicMaterial({ color:0x101010 })
@@ -413,6 +314,14 @@
       renderer.setAnimationLoop(()=>{
         if (videoTex && !video.paused && !video.ended) {
           videoTex.needsUpdate = true;
+        }
+        // Ensure XR per-eye layers are applied whenever session/cameras change
+        if (renderer.xr.isPresenting) {
+          const xrCam = renderer.xr.getCamera(camera);
+          if (xrCam && xrCam.cameras && xrCam.cameras.length >= 2) {
+            xrCam.cameras[0].layers.enable(1);
+            xrCam.cameras[1].layers.enable(2);
+          }
         }
         renderer.render(scene, camera);
       });
