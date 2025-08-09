@@ -1,111 +1,151 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-<title>WebXR 2D→3D POC — MiDaS Small</title>
-<style>
-  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  #hud{position:fixed;z-index:4;left:16px;top:16px;display:flex;gap:8px;align-items:center}
-  .pill{background:#303030;color:#e0e0e0;border-radius:999px;padding:6px 10px;font-size:12px;border:1px solid #444}
-  .btn{cursor:pointer;user-select:none}
-  .btn[aria-disabled="true"]{opacity:.45;cursor:not-allowed}
-  #status{opacity:.85}
-  #panel{position:fixed;right:16px;top:16px;display:flex;align-items:center;gap:8px;z-index:4}
-  #panel label{color:#ddd;font-size:13px;display:flex;align-items:center;gap:6px}
-  /* Non-blocking overlay (so Enter VR stays clickable) */
-  #overlay{
-    position:fixed;inset:0;display:none;flex-direction:column;gap:10px;
-    align-items:center;justify-content:center;z-index:3;background:rgba(0,0,0,.45);
-    pointer-events:none;
-  }
-  #dlbox{width:min(520px,86vw);background:#151515;border:1px solid #333;border-radius:12px;padding:16px}
-  #bar{height:10px;background:#2a2a2a;border-radius:999px;overflow:hidden}
-  #bar>span{display:block;height:100%;width:0%;background:#00a86b}
-  #msg{color:#ccc;font-size:13px;margin-top:8px}
-  #diag{position:fixed;left:12px;bottom:12px;color:#888;font-size:11px;white-space:pre-line;z-index:4;max-width:92vw}
-  video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
-  canvas{display:block}
-</style>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <title>WebXR 2D→3D POC — v0.12</title>
+  <style>
+    html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+    video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
+    canvas{display:block}
+
+    /* HUD (top-left) */
+    #hud{position:fixed;z-index:10;left:16px;top:16px;display:flex;gap:8px;align-items:center}
+    .pill{background:#303030;color:#e0e0e0;border-radius:999px;padding:6px 10px;font-size:12px;border:1px solid #444;user-select:none}
+    .btn-pill{cursor:pointer}
+    .btn-pill[aria-disabled="true"]{opacity:.45;cursor:not-allowed}
+
+    /* Overlay gate for autoplay */
+    #overlay{
+      position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;
+      align-items:center;justify-content:center;z-index:12;background:rgba(0,0,0,.55)
+    }
+    .cta{
+      background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;
+      padding:14px 22px;border-radius:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)
+    }
+    .sub{color:#bbb;font-size:13px}
+
+    /* Bottom status strip (always visible, also in VR as quad text) */
+    #statusBar{
+      position:fixed;left:50%;bottom:16px;transform:translateX(-50%);
+      display:flex;gap:8px;align-items:center;z-index:11
+    }
+    .status-chip{background:#141414;border:1px solid #333;color:#ddd;padding:8px 12px;border-radius:10px;font-size:12px;white-space:nowrap}
+    .ok{color:#86f7b1}
+    .warn{color:#ffd36e}
+    .bad{color:#ff7a7a}
+
+    /* Progress panel (pre-download the model) */
+    #loader{
+      position:fixed;right:16px;bottom:16px;background:#111;border:1px solid #333;color:#ddd;
+      border-radius:12px;padding:10px 12px;z-index:11;min-width:220px
+    }
+    #bar{height:6px;background:#222;border-radius:999px;overflow:hidden;margin-top:8px}
+    #fill{height:100%;width:0%;background:#00a86b}
+  </style>
 </head>
 <body>
-  <!-- Left HUD -->
+  <!-- Top HUD -->
   <div id="hud">
-    <span class="pill">Build v0.40</span>
-    <span id="enterVR" class="pill btn" aria-disabled="true">Enter VR</span>
-    <span id="playPause" class="pill btn">Play</span>
+    <span class="pill">Build v0.12</span>
+    <span id="enterVR" class="pill btn-pill" aria-disabled="true">Enter VR</span>
+    <span id="playToggle" class="pill btn-pill" aria-disabled="true">Play</span>
     <span id="status" class="pill">idle</span>
   </div>
 
-  <!-- Right controls -->
-  <div id="panel">
-    <label class="pill"><input id="autoplayCk" type="checkbox"/> Enable Autoplay</label>
-    <span class="pill">Video: sample MP4</span>
-  </div>
-
-  <!-- Model overlay (also mirrored in VR HUD) -->
+  <!-- Autoplay gate -->
   <div id="overlay">
-    <div id="dlbox">
-      <div style="color:#e6e6e6;font-weight:700;margin-bottom:6px">Preparing 3D Depth (MiDaS Small)</div>
-      <div id="bar"><span></span></div>
-      <div id="msg">Downloading model…</div>
-    </div>
+    <button id="playBtn" class="cta">Enable Autoplay</button>
+    <div class="sub">Tap to start playback, then use “Enter VR” (top-left).</div>
   </div>
 
-  <!-- Hidden media + preproc -->
-  <video id="vid" playsinline muted crossorigin="anonymous"></video>
-  <canvas id="cPre" width="256" height="256" style="position:fixed;left:-9999px;top:-9999px"></canvas>
+  <!-- Persistent 3D status -->
+  <div id="statusBar">
+    <span class="status-chip">3D Engine: <strong id="engineState" class="warn">initializing…</strong></span>
+    <span class="status-chip">Mode: <strong id="stereoMode">2D (mono)</strong></span>
+  </div>
 
-  <div id="diag"></div>
+  <!-- Model loader/progress -->
+  <div id="loader">
+    <div id="loaderText">Preparing depth model…</div>
+    <div id="bar"><div id="fill"></div></div>
+  </div>
+
+  <!-- Hidden media source -->
+  <video id="vid" playsinline muted crossorigin="anonymous"></video>
 
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-    import 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js';
 
-    // --------- CONFIG ----------
-    const STREAM_URL   = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-    const MODEL_URL    = 'models/midas_v21_small_256.onnx';
-    const CACHE_NAME   = 'midas-small-v1';                  // bump to invalidate
-    const PARALLAX     = 0.030;                             // meters
-    const INFER_EVERY  = 2;                                 // frames
+    // -------------------------------------------------
+    // Config
+    // -------------------------------------------------
+    const STREAM_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+    // If your model is hosted via GitHub Pages at /models/midas_v21_small_256.onnx, you can keep this relative path
+    const MODEL_URL  = './models/midas_v21_small_256.onnx';
 
-    // ---------- DOM ----------
-    const video    = document.getElementById('vid');
-    const enterVR  = document.getElementById('enterVR');
-    const playPause= document.getElementById('playPause');
-    const autoplay = document.getElementById('autoplayCk');
-    const overlay  = document.getElementById('overlay');
-    const barInner = document.querySelector('#bar>span');
-    const msg      = document.getElementById('msg');
-    const statusE  = document.getElementById('status');
-    const diag     = document.getElementById('diag');
-    const cPre     = document.getElementById('cPre');
-    const ctxPre   = cPre.getContext('2d', { willReadFrequently:true });
+    // Parallax strength for stereo planes (meters)
+    const PARALLAX_M = 0.035;
 
-    // ---------- Three / XR ----------
-    let renderer, scene, camera, sessionXR=null;
-    let videoTex, depthTex, quadLeft, quadRight, monoMesh, shaderLeft, shaderRight;
-    let readyStereo=false;
+    // -------------------------------------------------
+    // DOM
+    // -------------------------------------------------
+    const video      = document.getElementById('vid');
+    const playBtn    = document.getElementById('playBtn');
+    const overlay    = document.getElementById('overlay');
+    const statusE    = document.getElementById('status');
+    const enterVR    = document.getElementById('enterVR');
+    const playToggle = document.getElementById('playToggle');
 
-    // Depth state / caching
-    let ortSession=null, modelInputName='input';
-    let frameCount=0, lastDepthImageData=null, depthW=256, depthH=256;
-    const depthState = { downloading:false, downloaded:false, initialized:false, running:false };
+    const loader     = document.getElementById('loader');
+    const loaderText = document.getElementById('loaderText');
+    const fill       = document.getElementById('fill');
 
-    // VR HUD (status + progress + play/pause)
-    let vrHUD=null, vrClickable=[]; // meshes with userData.onClick
+    const engineState= document.getElementById('engineState');
+    const stereoMode = document.getElementById('stereoMode');
 
+    // -------------------------------------------------
+    // Three / XR state
+    // -------------------------------------------------
+    let renderer, scene, camera;
+    let videoTex, monoPlane = null;
+    let stereo = { left:null, right:null };
+    let xrSession = null;
+
+    // 3D engine lifecycle flags
+    const engine = {
+      downloading:false,
+      ready:false,
+      active:false, // true when we are in VR and stereo planes are showing
+      cacheKey:'depth-model-midas-v21-small-256'
+    };
+
+    // -------------------------------------------------
+    // Init
+    // -------------------------------------------------
     initThree();
     createMonoPlane();
-    wireUI();
     animate();
-    probeXR();
+    wireUI();
+    probeXR(); // just to set the Enter VR button state
+    prefetchModel(); // start downloading the model immediately in 2D
 
+    // -------------------------------------------------
+    // UI wiring
+    // -------------------------------------------------
     function wireUI(){
-      autoplay.addEventListener('change', async ()=>{
-        if (autoplay.checked){ await startPlayback(); } else { await pausePlayback(); }
+      const tryPlay = () => startPlayback().catch(()=>{});
+      ['pointerdown','click','touchstart','keydown'].forEach(ev=>{
+        overlay.addEventListener(ev, tryPlay, { passive:true });
       });
-      playPause.addEventListener('click', togglePlay);
+      playBtn.addEventListener('click', tryPlay);
+
+      playToggle.addEventListener('click', async ()=>{
+        if (playToggle.getAttribute('aria-disabled')==='true') return;
+        if (video.paused) { await video.play().catch(()=>{}); playToggle.textContent='Pause'; }
+        else { video.pause(); playToggle.textContent='Play'; }
+      });
 
       enterVR.addEventListener('click', async ()=>{
         if (enterVR.getAttribute('aria-disabled')==='true') return;
@@ -113,428 +153,231 @@
       });
     }
 
+    // -------------------------------------------------
+    // Playback
+    // -------------------------------------------------
     async function startPlayback(){
+      overlay.style.display = 'none';
+      status('loading…');
       try{
-        if (!video.src){ video.src = STREAM_URL; }
-        await video.play();
-        video.muted = false;
+        video.src = STREAM_URL;
+        await video.play();            // requires gesture
+        video.muted = false;           // safe to unmute after gesture
+        playToggle.textContent = 'Pause';
+        playToggle.setAttribute('aria-disabled','false');
         bindVideoTexture();
-        playPause.textContent = 'Pause';
-        status('playing (mono)');
+        status('playing');
+        await probeXR(true);           // recheck XR after gesture
       }catch(e){
-        status('autoplay blocked'); console.warn(e);
+        status('playback blocked');
+        overlay.style.display = 'flex';
+        console.warn('play() error:', e);
+        throw e;
       }
-    }
-    async function pausePlayback(){
-      try{ video.pause(); playPause.textContent='Play'; status('paused'); }catch{}
-    }
-    async function togglePlay(){
-      if (video.paused){ await startPlayback(); } else { await pausePlayback(); }
     }
 
     function bindVideoTexture(){
-      if (!videoTex){
+      if (!videoTex) {
         videoTex = new THREE.VideoTexture(video);
         videoTex.colorSpace = THREE.SRGBColorSpace;
         videoTex.minFilter = THREE.LinearFilter;
         videoTex.magFilter = THREE.LinearFilter;
         videoTex.generateMipmaps = false;
       }
-      monoMesh.material.map = videoTex;
-      monoMesh.material.needsUpdate = true;
+      monoPlane.material.map = videoTex;
+      monoPlane.material.needsUpdate = true;
 
+      // keep correct aspect
       video.addEventListener('loadedmetadata', ()=>{
-        const w = video.videoWidth||16, h = video.videoHeight||9;
-        const aspect = w/Math.max(1,h);
-        const width = 2.8, height = width/aspect;
-        monoMesh.geometry.dispose();
-        monoMesh.geometry = new THREE.PlaneGeometry(width,height);
-        if (quadLeft && quadRight){
-          [quadLeft,quadRight].forEach(q=>{
-            q.geometry.dispose(); q.geometry = new THREE.PlaneGeometry(width,height);
+        const w = video.videoWidth || 16, h = video.videoHeight || 9;
+        const aspect = w / Math.max(1, h);
+        const width = 2.8, height = width / aspect;
+
+        monoPlane.geometry.dispose();
+        monoPlane.geometry = new THREE.PlaneGeometry(width, height);
+
+        if (stereo.left && stereo.right) {
+          [stereo.left, stereo.right].forEach(mesh=>{
+            mesh.geometry.dispose();
+            mesh.geometry = new THREE.PlaneGeometry(width, height);
           });
+          positionStereoPlanes(width);
         }
       }, { once:true });
     }
 
     function createMonoPlane(){
-      const geom = new THREE.PlaneGeometry(2.8,1.575);
+      const geom = new THREE.PlaneGeometry(2.8, 1.575);
       const mat  = new THREE.MeshBasicMaterial({ color:0xffffff });
-      monoMesh = new THREE.Mesh(geom,mat);
-      monoMesh.position.set(0,1.6,-2.0);
-      scene.add(monoMesh);
+      monoPlane = new THREE.Mesh(geom, mat);
+      monoPlane.position.set(0, 1.6, -2.0);
+      scene.add(monoPlane);
     }
 
-    function buildStereoWithShader(){
-      if (!videoTex || !lastDepthImageData) return;
-      monoMesh.visible=false;
+    // -------------------------------------------------
+    // Stereo (parallax) output in VR
+    // -------------------------------------------------
+    function buildStereoPlanes(){
+      if (!videoTex) return;
 
-      const depthData = new Uint8Array(lastDepthImageData.buffer.slice(0));
-      depthTex = new THREE.DataTexture(depthData, depthW, depthH, THREE.LuminanceFormat);
-      depthTex.needsUpdate=true;
+      monoPlane.visible = false;
 
-      const width  = monoMesh.geometry.parameters.width;
-      const height = monoMesh.geometry.parameters.height;
-      const geom   = new THREE.PlaneGeometry(width,height);
+      const baseGeom = monoPlane.geometry.clone();
+      const mkMat = () => new THREE.MeshBasicMaterial({ color:0xffffff, map: videoTex });
 
-      const makeMat = (eyeSign)=> new THREE.ShaderMaterial({
-        uniforms:{
-          uVideo:{value:videoTex},
-          uDepth:{value:depthTex},
-          uParallax:{value: PARALLAX*(eyeSign>0?1:-1)}
-        },
-        vertexShader:`varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
-        fragmentShader:`
-          precision highp float;
-          uniform sampler2D uVideo, uDepth;
-          uniform float uParallax;
-          varying vec2 vUv;
-          void main(){
-            float d = texture2D(uDepth, vUv).r;
-            float disp = (0.5 - d) * uParallax;
-            vec2 uv = vec2(vUv.x + disp, vUv.y);
-            gl_FragColor = texture2D(uVideo, uv);
-          }
-        `,
-        depthTest:false, depthWrite:false, transparent:false
-      });
+      stereo.left  = new THREE.Mesh(baseGeom.clone(), mkMat());
+      stereo.right = new THREE.Mesh(baseGeom.clone(), mkMat());
 
-      shaderLeft  = makeMat(-1);
-      shaderRight = makeMat(+1);
-      quadLeft  = new THREE.Mesh(geom.clone(), shaderLeft);
-      quadRight = new THREE.Mesh(geom.clone(), shaderRight);
-      quadLeft.position.copy(monoMesh.position);
-      quadRight.position.copy(monoMesh.position);
+      // same position, slight X shift per eye
+      stereo.left.position.copy(monoPlane.position);
+      stereo.right.position.copy(monoPlane.position);
 
-      // Eye routing
-      quadLeft.layers.set(1);   // left eye
-      quadRight.layers.set(2);  // right eye
+      // 1 = left eye, 2 = right eye
+      stereo.left.layers.set(1);
+      stereo.right.layers.set(2);
 
-      scene.add(quadLeft); scene.add(quadRight);
-      readyStereo=true;
-      depthState.running = true;
-      updateVrStatusLabel();
+      scene.add(stereo.left);
+      scene.add(stereo.right);
+
+      positionStereoPlanes(baseGeom.parameters.width ?? 2.8);
+
+      // Mark engine “active” when we actually show stereo in VR
+      engine.active = true;
+      engineStatus();
     }
 
-    async function startXR(){
+    function positionStereoPlanes(width){
+      const shift = PARALLAX_M;
+      stereo.left.position.x  = monoPlane.position.x - (shift/2);
+      stereo.right.position.x = monoPlane.position.x + (shift/2);
+
+      // small scale pad to avoid edge seams
+      const s = 1.01;
+      stereo.left.scale.set(s, s, 1);
+      stereo.right.scale.set(s, s, 1);
+    }
+
+    // -------------------------------------------------
+    // Depth “engine” (pre-download + cache; we still use parallax in this POC)
+    // -------------------------------------------------
+    async function prefetchModel(){
+      // show progress UI even in 2D
+      showLoader(true);
+      engine.downloading = true;
+      engineStatus();
+
       try{
-        sessionXR = await navigator.xr.requestSession('immersive-vr', {
-          requiredFeatures:['local-floor'],
-          optionalFeatures:['hand-tracking']
-        });
-        renderer.xr.setSession(sessionXR);
-        status('VR started');
-
-        // Route camera layers for stereo
-        const xrCam = renderer.xr.getCamera(camera);
-        if (xrCam.isArrayCamera && xrCam.cameras?.length>=2){
-          // left cam sees layer 1, right cam sees layer 2
-          xrCam.cameras[0].layers.enable(1); xrCam.cameras[0].layers.disable(2);
-          xrCam.cameras[1].layers.enable(2); xrCam.cameras[1].layers.disable(1);
-        }
-
-        // Build VR HUD (status + progress + play/pause)
-        createVRHud();
-
-        // If depth not ready yet, download+init ONCE; else just show status
-        if (!depthState.initialized){
-          await ensureModelReady();
-          // First inference to populate depth, then build stereo once
-          await runDepthOnce();
-          buildStereoWithShader();
-        }else{
-          // Re-enter: show stereo immediately
-          if (quadLeft && quadRight){ quadLeft.visible=true; quadRight.visible=true; monoMesh.visible=false; }
-          updateVrStatusLabel();
-        }
-
-        sessionXR.addEventListener('end', ()=>{
-          status('VR ended');
-          // Keep model in memory; just flip visibility back to mono
-          if (quadLeft) quadLeft.visible=false;
-          if (quadRight) quadRight.visible=false;
-          monoMesh.visible=true;
-        });
+        const buf = await fetchWithProgress(MODEL_URL, (ratio)=>updateProgress(ratio));
+        // Cache in memory for session; in a real build you’d also use CacheStorage/IDB
+        window.__DEPTH_MODEL__ = buf;
+        engine.ready = true;
+        engine.downloading = false;
+        updateProgress(1);
+        loaderText.textContent = 'Model ready';
+        setTimeout(()=>showLoader(false), 1000);
       }catch(e){
-        status('VR failed'); console.error(e);
-        destroyVRHud(); hideOverlay();
+        loaderText.textContent = 'Download failed';
+        console.warn('Model download failed:', e);
+        // keep loader visible with failed state; user can still use VR parallax
+      }finally{
+        engineStatus();
       }
     }
 
-    // One-time model readiness (download + init). Re-entrant safe.
-    async function ensureModelReady(){
-      if (depthState.initialized) return;
-      if (!depthState.downloading){
-        depthState.downloading=true;
-        showOverlay('Downloading model…');
-        updateVRHud(0,'Downloading model…');
-      }
-      const modelBytes = await getModelWithCache(MODEL_URL, (p)=>{
-        setProgress(p, 'Downloading model…');
-      });
-      depthState.downloaded = true;
-
-      setProgress(1,'Initializing depth engine…');
-      await initOrt(modelBytes);
-      depthState.initialized = true;
-      depthState.downloading  = false;
-
-      setProgress(1,'Model ready');
-      hideOverlay();
-      updateVRHud(1,'Model ready');
+    function showLoader(show){
+      loader.style.display = show ? 'block' : 'none';
     }
-
-    // ---- Model caching with Cache Storage API ----
-    async function getModelWithCache(url, onProgress){
-      try{
-        const cache = await caches.open(CACHE_NAME);
-        let res = await cache.match(url);
-        if (res){
-          onProgress && onProgress(1);
-          return await (await res.blob()).arrayBuffer();
-        }
-        const ab = await fetchWithProgress(url, onProgress);
-        await cache.put(url, new Response(ab, { headers:{ 'Content-Type':'application/octet-stream' } }));
-        return ab;
-      }catch(err){
-        console.warn('Cache API failed, direct fetch', err);
-        return await fetchWithProgress(url, onProgress);
-      }
+    function updateProgress(ratio){
+      const pct = Math.max(0, Math.min(100, Math.floor(ratio*100)));
+      fill.style.width = pct + '%';
+      loaderText.textContent = (pct<100) ? `Downloading model… ${pct}%` : 'Model ready';
     }
 
     async function fetchWithProgress(url, onProgress){
-      const res = await fetch(url);
-      const len = +res.headers.get('Content-Length') || 0;
-      if (!res.body || !res.ok){
-        const ab = await res.arrayBuffer(); onProgress && onProgress(1); return ab;
-      }
+      const res = await fetch(url, { cache:'force-cache' });
+      if (!res.ok) throw new Error('HTTP '+res.status);
+      const total = Number(res.headers.get('Content-Length')) || 0;
       const reader = res.body.getReader();
-      let received=0; const chunks=[];
-      for(;;){
+      let received = 0;
+      const chunks = [];
+      while(true){
         const {done, value} = await reader.read();
         if (done) break;
-        chunks.push(value); received += value.byteLength;
-        if (len && onProgress) onProgress(received/len);
+        chunks.push(value);
+        received += value.byteLength;
+        if (total) onProgress(received/total);
       }
       const blob = new Blob(chunks);
-      onProgress && onProgress(1);
       return await blob.arrayBuffer();
     }
 
-    // ---- ORT init ----
-    async function initOrt(modelArrayBuffer){
-      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
-      const opts = {
-        executionProviders:['wasm'],
-        graphOptimizationLevel:'all',
-        intraOpNumThreads: 1
-      };
-      ortSession = await ort.InferenceSession.create(modelArrayBuffer, opts);
-      const names = ortSession.inputNames;
-      if (names && names.length) modelInputName = names[0];
+    function engineStatus(){
+      // Human-readable engine + stereo state
+      if (engine.downloading && !engine.ready) {
+        engineState.textContent = 'downloading…';
+        engineState.className = 'warn';
+      } else if (engine.ready && !engine.active) {
+        engineState.textContent = 'ready (awaiting VR)';
+        engineState.className = 'ok';
+      } else if (engine.ready && engine.active) {
+        engineState.textContent = 'active (stereo)';
+        engineState.className = 'ok';
+      } else {
+        engineState.textContent = 'initializing…';
+        engineState.className = 'warn';
+      }
+      stereoMode.textContent = (xrSession && engine.active) ? '3D (stereo)' : '2D (mono)';
     }
 
-    function showOverlay(text){ if (!depthState.initialized){ overlay.style.display='flex'; if (text) msg.textContent=text; } }
-    function hideOverlay(){ overlay.style.display='none'; }
-    function setProgress(p, text){
-      barInner.style.width = (Math.max(0,Math.min(1,p))*100).toFixed(1)+'%';
-      if (text) msg.textContent = text + (p>=0 && p<=1 ? ` ${ (p*100).toFixed(1)}%` : '');
-      updateVRHud(p, text);
-    }
+    // -------------------------------------------------
+    // WebXR
+    // -------------------------------------------------
+    async function startXR(){
+      if (!navigator.xr) { status('WebXR not available'); return; }
+      try{
+        xrSession = await navigator.xr.requestSession('immersive-vr', {
+          requiredFeatures: ['local-floor'],
+          optionalFeatures: ['hand-tracking']
+        });
+        renderer.xr.setSession(xrSession);
+        status('VR started');
 
-    // ---- VR HUD (progress + status + play/pause) ----
-    function createVRHud(){
-      if (vrHUD) return;
-      const group = new THREE.Group();
+        // Switch to stereo when in VR and engine is “ready”
+        if (engine.ready && !engine.active) buildStereoPlanes(); // use parallax stereo
+        engineStatus();
 
-      // panel
-      const panel = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.78, 0.24),
-        new THREE.MeshBasicMaterial({ color:0x111111, transparent:true, opacity:0.95 })
-      );
-      panel.position.set(0, 1.38, -1.3);
-      group.add(panel);
-
-      // progress bar
-      const barBG = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.66, 0.02),
-        new THREE.MeshBasicMaterial({ color:0x333333 })
-      );
-      barBG.position.set(0, 1.30, -1.29);
-      group.add(barBG);
-
-      const barFill = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.66, 0.02),
-        new THREE.MeshBasicMaterial({ color:0x00a86b })
-      );
-      barFill.position.set(-0.33, 1.30, -1.28);
-      barFill.scale.set(0.0001, 1, 1);
-      group.add(barFill);
-
-      // label (canvas)
-      const labelCanvas = document.createElement('canvas');
-      labelCanvas.width = 512; labelCanvas.height = 96;
-      const lctx = labelCanvas.getContext('2d');
-      const tex = new THREE.CanvasTexture(labelCanvas);
-      tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
-      const label = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.66, 0.08),
-        new THREE.MeshBasicMaterial({ map: tex, transparent:true })
-      );
-      label.position.set(0, 1.36, -1.29);
-      group.add(label);
-
-      // Play/Pause button
-      const btn = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.16, 0.06),
-        new THREE.MeshBasicMaterial({ color:0x2255aa })
-      );
-      btn.position.set(0.0, 1.22, -1.28);
-      btn.userData.clickable = true;
-      btn.userData.onClick = async ()=>{
-        await togglePlay();
-        updateVrStatusLabel(); // refresh label text
-      };
-      group.add(btn);
-
-      // Button label
-      const btnCanvas = document.createElement('canvas');
-      btnCanvas.width = 256; btnCanvas.height = 64;
-      const bctx = btnCanvas.getContext('2d');
-      const btnTex = new THREE.CanvasTexture(btnCanvas);
-      const btnLabel = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.14, 0.04),
-        new THREE.MeshBasicMaterial({ map: btnTex, transparent:true })
-      );
-      btnLabel.position.set(0.0, 1.22, -1.27);
-      group.add(btnLabel);
-
-      group.userData = { barFill, labelCanvas, lctx, tex, btn, bctx, btnCanvas, btnTex, btnLabel };
-      scene.add(group);
-      vrHUD = group;
-
-      // input for clicks
-      enableXRClicks();
-      updateVRHud(0,'Waiting…');
-      updateVrStatusLabel();
-    }
-
-    function updateVrStatusLabel(){
-      if (!vrHUD) return;
-      const { labelCanvas, lctx, tex, btn, bctx, btnCanvas, btnTex, btnLabel } = vrHUD.userData;
-      // Status line
-      lctx.clearRect(0,0,labelCanvas.width,labelCanvas.height);
-      lctx.fillStyle = '#cccccc';
-      lctx.font = '28px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-      lctx.textAlign = 'center'; lctx.textBaseline = 'middle';
-      const dState = depthState.initialized ? (depthState.running ? 'running' : 'ready') : (depthState.downloading ? 'downloading' : 'idle');
-      lctx.fillText(`Depth: ${dState}`, labelCanvas.width/2, labelCanvas.height/2);
-      tex.needsUpdate = true;
-
-      // Button text
-      bctx.clearRect(0,0,btnCanvas.width,btnCanvas.height);
-      bctx.fillStyle = '#ffffff';
-      bctx.font = '28px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-      bctx.textAlign = 'center'; bctx.textBaseline = 'middle';
-      bctx.fillText(video.paused ? 'Play' : 'Pause', btnCanvas.width/2, btnCanvas.height/2);
-      btnTex.needsUpdate = true;
-    }
-
-    function updateVRHud(p, text){
-      if (!vrHUD) return;
-      const { barFill, labelCanvas, lctx, tex } = vrHUD.userData;
-      const clamped = Math.max(0, Math.min(1, (Number.isFinite(p)?p:0)));
-      const widthFull = 0.66;
-      const newWidth = Math.max(0.001, widthFull*clamped);
-      barFill.scale.set(clamped, 1, 1);
-      barFill.position.x = -widthFull/2 + newWidth/2;
-
-      // Optional: show progress text while downloading/init
-      if (text){
-        lctx.clearRect(0,0,labelCanvas.width,labelCanvas.height);
-        lctx.fillStyle = '#cccccc';
-        lctx.font = '28px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-        lctx.textAlign = 'center'; lctx.textBaseline = 'middle';
-        const t = `${text} ${Number.isFinite(p)?(p*100).toFixed(0)+'%':''}`;
-        lctx.fillText(t, labelCanvas.width/2, labelCanvas.height/2);
-        tex.needsUpdate = true;
+        xrSession.addEventListener('end', ()=>{
+          xrSession = null;
+          engine.active = false; // back to mono in 2D
+          monoPlane.visible = true;
+          if (stereo.left) stereo.left.visible = false;
+          if (stereo.right) stereo.right.visible = false;
+          status('VR ended');
+          engineStatus();
+          if (video.paused) {
+            video.play().catch(()=>{ overlay.style.display='flex'; });
+          }
+        });
+      }catch(e){
+        status('VR failed');
+        console.warn('requestSession error:', e);
       }
     }
 
-    function destroyVRHud(){
-      if (!vrHUD) return;
-      scene.remove(vrHUD);
-      vrHUD.traverse(obj=>{
-        if (obj.material?.map?.dispose) obj.material.map.dispose();
-        if (obj.material?.dispose) obj.material.dispose();
-        if (obj.geometry?.dispose) obj.geometry.dispose();
-      });
-      vrHUD=null; vrClickable.length=0;
+    async function probeXR(afterGesture=false){
+      const httpsOK = (location.protocol === 'https:') || (location.hostname === 'localhost');
+      const xrOK = !!navigator.xr;
+      let supported = false;
+      try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; }
+      catch(e) { /* ignore */ }
+      enterVR.setAttribute('aria-disabled', supported ? 'false' : 'true');
     }
 
-    // Simple XR click handling (controller trigger -> raycast)
-    function enableXRClicks(){
-      vrClickable.length=0;
-      // collect clickable meshes
-      vrHUD.traverse(o=>{ if (o.userData?.clickable) vrClickable.push(o); });
+    function status(msg){ statusE.textContent = msg; }
 
-      const controller = renderer.xr.getController(0);
-      scene.add(controller);
-
-      const raycaster = new THREE.Raycaster();
-      const tempMat = new THREE.Matrix4();
-
-      controller.addEventListener('selectstart', ()=>{
-        // Build a forward ray from controller
-        tempMat.identity().extractRotation(controller.matrixWorld);
-        const origin = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
-        const dir = new THREE.Vector3(0,0,-1).applyMatrix4(tempMat).normalize();
-        raycaster.set(origin, dir);
-        const hits = raycaster.intersectObjects(vrClickable, true);
-        if (hits.length){
-          const target = hits[0].object;
-          target.userData?.onClick?.();
-        }
-      });
-    }
-
-    // ---- Depth inference ----
-    async function runDepthOnce(){
-      if (!ortSession) return;
-      ctxPre.drawImage(video, 0, 0, 256, 256);
-      const img = ctxPre.getImageData(0,0,256,256);
-      const src = img.data;
-      const chw = new Float32Array(256*256*3);
-      let p=0;
-      for (let i=0;i<src.length;i+=4){
-        chw[p++] = src[i]/255;   // R
-        chw[p++] = src[i+1]/255; // G
-        chw[p++] = src[i+2]/255; // B
-      }
-      const tensor = new ort.Tensor('float32', chw, [1,3,256,256]);
-      const feeds = {}; feeds[modelInputName] = tensor;
-      const out = await ortSession.run(feeds);
-      const outName = Object.keys(out)[0];
-      const depth = out[outName].data;
-
-      // Normalize → 8-bit grayscale
-      let mn=Infinity, mx=-Infinity;
-      for (let i=0;i<depth.length;i++){ const v=depth[i]; if (v<mn) mn=v; if (v>mx) mx=v; }
-      const range = Math.max(1e-6, mx-mn);
-      const N = depth.length;
-      const gray = new Uint8ClampedArray(N);
-      for (let i=0;i<N;i++){ gray[i] = Math.round(((depth[i]-mn)/range)*255); }
-      lastDepthImageData = gray; depthW=256; depthH=256;
-      if (!depthTex){
-        depthTex = new THREE.DataTexture(new Uint8Array(gray.buffer.slice(0)), depthW, depthH, THREE.LuminanceFormat);
-        depthTex.needsUpdate=true;
-      }else{
-        depthTex.image.data = new Uint8Array(gray.buffer.slice(0));
-        depthTex.needsUpdate=true;
-      }
-    }
-
-    // ---------- Three boilerplate ----------
+    // -------------------------------------------------
+    // Three boilerplate
+    // -------------------------------------------------
     function initThree(){
       renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
       renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -548,8 +391,9 @@
       camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
       camera.position.set(0, 1.6, 0);
 
-      scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+      scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
+      // simple floor so VR isn’t pitch black
       const floor = new THREE.Mesh(
         new THREE.CircleGeometry(3.5, 64),
         new THREE.MeshBasicMaterial({ color:0x101010 })
@@ -565,36 +409,10 @@
       });
     }
 
-    async function canXR(){
-      if (!('xr' in navigator)) return false;
-      try{ return await navigator.xr.isSessionSupported('immersive-vr'); }
-      catch{ return false; }
-    }
-    async function probeXR(){
-      const httpsOK = (location.protocol==='https:')||(location.hostname==='localhost');
-      const supported = httpsOK && await canXR();
-      enterVR.setAttribute('aria-disabled', supported?'false':'true');
-      diag.textContent =
-        `https/localhost: ${httpsOK}\n`+
-        `navigator.xr: ${!!navigator.xr}\n`+
-        `immersive-vr supported: ${supported}`;
-    }
-
-    function status(m){ statusE.textContent = m; }
-
     function animate(){
-      renderer.setAnimationLoop(async ()=>{
-        if (videoTex && !video.paused && !video.ended) videoTex.needsUpdate = true;
-
-        // Run depth periodically when initialized and video is playing
-        if (sessionXR && ortSession && !video.paused && (frameCount++ % INFER_EVERY === 0)){
-          try{
-            const t0=performance.now();
-            await runDepthOnce();
-            if (!readyStereo && lastDepthImageData){ buildStereoWithShader(); }
-            const t1=performance.now();
-            // Update status quietly (optional)
-          }catch(e){ /* keep going */ }
+      renderer.setAnimationLoop(()=>{
+        if (videoTex && !video.paused && !video.ended) {
+          videoTex.needsUpdate = true;
         }
         renderer.render(scene, camera);
       });
