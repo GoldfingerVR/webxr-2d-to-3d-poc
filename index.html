@@ -30,12 +30,13 @@
     #diag{position:fixed;left:12px;bottom:12px;color:#aaa;font-size:12px;white-space:pre-line;z-index:9;max-width:92vw}
   </style>
 
-  <!-- ONNX Runtime: CDN, single-threaded, SIMD on -->
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
+  <!-- ONNX Runtime WEB via UNPKG (CDN) -->
+  <script src="https://unpkg.com/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
   <script>
-    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/";
-    ort.env.wasm.simd = true;
-    ort.env.wasm.numThreads = 1; // avoids COOP/COEP, works in Oculus Browser
+    // Point ORT to fetch its wasm from UNPKG as well
+    ort.env.wasm.wasmPaths = "https://unpkg.com/onnxruntime-web@1.19.2/dist/";
+    ort.env.wasm.simd = true;      // try SIMD first
+    ort.env.wasm.numThreads = 1;   // single-thread → no COOP/COEP needed
   </script>
 </head>
 <body>
