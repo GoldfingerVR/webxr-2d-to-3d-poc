@@ -15,3 +15,8 @@
 
 /*.css
   Cache-Control: public, max-age=604800
+
+
+/ort/*.wasm
+  Content-Type: application/wasm
+  Cache-Control: public, max-age=31536000, immutable
