@@ -30,17 +30,12 @@
     #diag{position:fixed;left:12px;bottom:12px;color:#aaa;font-size:12px;white-space:pre-line;z-index:9;max-width:92vw}
   </style>
 
-  <!-- 3. Lock ONNX Runtime to single-threaded WASM (SIMD on) -->
-  <script src="./ort/ort.min.js"></script>
+  <!-- ONNX Runtime: CDN, single-threaded, SIMD on -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
   <script>
-    if (window.ort && ort.env && ort.env.wasm) {
-      // Serve the WASM blobs from your repo’s /ort/ folder
-      ort.env.wasm.wasmPaths = "./ort/";
-      // SIMD helps performance and is safe to keep on
-      ort.env.wasm.simd = true;
-      // Force single-thread so it runs everywhere (no jsep warning, no COOP/COEP requirement)
-      ort.env.wasm.numThreads = 1;
-    }
+    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/";
+    ort.env.wasm.simd = true;
+    ort.env.wasm.numThreads = 1; // avoids COOP/COEP, works in Oculus Browser
   </script>
 </head>
 <body>
