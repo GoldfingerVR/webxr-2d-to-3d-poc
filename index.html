@@ -3,39 +3,40 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>WebXR 2D→3D POC — v0.20 (Depth On-Device)</title>
+  <title>WebXR 2D→3D POC — v0.21 (Depth On-Device)</title>
   <style>
     html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
     video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
     canvas{display:block}
-    /* HUD (top-left) */
     #hud{position:fixed;z-index:10;left:16px;top:16px;display:flex;gap:8px;align-items:center}
     .pill{background:#303030;color:#e0e0e0;border-radius:999px;padding:6px 10px;font-size:12px;border:1px solid #444;user-select:none}
     .btn-pill{cursor:pointer}
     .btn-pill[aria-disabled="true"]{opacity:.45;cursor:not-allowed}
-    /* Bottom status strip */
     #statusBar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:flex;gap:8px;align-items:center;z-index:11}
     .status-chip{background:#141414;border:1px solid #333;color:#ddd;padding:8px 12px;border-radius:10px;font-size:12px;white-space:nowrap}
     .ok{color:#86f7b1}.warn{color:#ffd36e}.bad{color:#ff7a7a}
-    /* Loader */
     #loader{position:fixed;right:16px;bottom:16px;background:#111;border:1px solid #333;color:#ddd;border-radius:12px;padding:10px 12px;z-index:11;min-width:260px;display:none}
     #bar{height:6px;background:#222;border-radius:999px;overflow:hidden;margin-top:8px}
     #fill{height:100%;width:0%;background:#00a86b}
-    /* Start overlay */
     #center{position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;z-index:12;background:rgba(0,0,0,.55)}
     .cta{background:#00a86b;border:none;color:#fff;font-weight:700;font-size:18px;padding:14px 22px;border-radius:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)}
     .cta[disabled]{opacity:.45;cursor:not-allowed}
     .sub{color:#bbb;font-size:13px;text-align:center}
-    /* Log */
     #diag{position:fixed;left:12px;bottom:12px;color:#aaa;font-size:12px;white-space:pre-line;z-index:9;max-width:92vw}
   </style>
-  <!-- ONNX Runtime (WASM) -->
+  <!-- ONNX Runtime Web (WASM) -->
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort-web.min.js"></script>
+  <script>
+    // Make sure ORT knows where to load wasm binaries from (Oculus Browser needs this explicit)
+    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/";
+    // Lower thread count for stability on mobile headsets
+    ort.env.wasm.numThreads = 1;
+  </script>
 </head>
 <body>
   <!-- HUD -->
   <div id="hud">
-    <span class="pill">Build v0.20</span>
+    <span class="pill">Build v0.21</span>
     <span id="enterVR" class="pill btn-pill" aria-disabled="true">Enter VR</span>
     <span id="playToggle" class="pill btn-pill" aria-disabled="true">Play</span>
     <span id="status" class="pill">idle</span>
@@ -56,7 +57,7 @@
   <!-- Start -->
   <div id="center">
     <button id="startBtn" class="cta">Start Session</button>
-    <div class="sub">Downloads the depth model, warms up the engine, then enables Play + Enter VR.</div>
+    <div class="sub">Downloads the depth model (cached), warms up the engine, then enables Play + Enter VR.</div>
   </div>
 
   <!-- Hidden media -->
@@ -68,11 +69,15 @@
 
     // -------------------- Config --------------------
     const STREAM_URL  = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4';
-    const MODEL_URL   = './models/midas_v21_small_256.onnx'; // must exist on your Pages
-    const DEPTH_SIZE  = 256;          // MiDaS small expects 256
-    const DEPTH_FPS   = 12;           // run depth ~12fps to keep perf stable
-    const DEPTH_DISPARITY = 0.12;     // **big** disparity so 3D is obvious (tune down later)
-    const PARALLAX_FALLBACK = 0.06;   // fallback shift if depth fails
+    const MODEL_URL   = './models/midas_v21_small_256.onnx'; // host on your Pages
+    const MODEL_CACHE = 'depth-model-cache-v1';              // CacheStorage name
+    const MODEL_KEY   = MODEL_URL;                           // cache key
+
+    // MiDaS-small: 256x256, NCHW, float32, ImageNet normalization
+    const DEPTH_SIZE  = 256;
+    const DEPTH_FPS   = 12;
+    const DEPTH_DISPARITY = 0.22;   // very strong so you *see* it; tune down later
+    const PARALLAX_FALLBACK = 0.06;
 
     // -------------------- DOM --------------------
     const video      = document.getElementById('vid');
@@ -96,8 +101,8 @@
 
     const engine = {
       downloading:false,
-      ready:false,      // model downloaded
-      warm:false,       // session created
+      ready:false,      // model fetched to memory
+      warm:false,       // ORT session created
       active:false,     // rendering stereo in VR
       mode:'mono',      // 'mono' | 'depth' | 'parallax'
       ortSession:null,
@@ -106,13 +111,13 @@
       lastDepthTime:0
     };
 
-    // CPU helpers for depth preprocessing
+    // Work canvas for preprocessing
     const workCanvas = document.createElement('canvas');
     const workCtx    = workCanvas.getContext('2d', { willReadFrequently:true });
     workCanvas.width = DEPTH_SIZE; workCanvas.height = DEPTH_SIZE;
 
-    // For passing depth to shader
-    let depthTex = null; // THREE.DataTexture (R channel)
+    // Depth texture for shader
+    let depthTex = null; // THREE.DataTexture (R8)
 
     // -------------------- Init --------------------
     initThree();
@@ -171,27 +176,27 @@
       engineState.textContent = 'initializing…'; engineState.className='warn';
       showLoader(true);
 
-      // 1) Download model with progress
       try{
+        // 1) Fetch (or load from cache) with progress
         engine.downloading = true; engine.ready=false; engine.warm=false;
-        const buf = await fetchWithProgress(MODEL_URL, r=>updateProgress(r));
+        const buf = await getModelArrayBufferWithCache(MODEL_URL, (r)=>updateProgress(r));
         engine.downloading=false; engine.ready=true;
         updateProgress(1);
         loaderText.textContent='Model downloaded';
         engineState.textContent='downloaded'; engineState.className='ok';
 
-        // 2) Warm ORT session
+        // 2) Create ORT session
         loaderText.textContent='Warming depth engine…';
         const session = await ort.InferenceSession.create(buf, { executionProviders:['wasm'] });
         engine.ortSession = session;
 
-        // Choose first input/output names safely
+        // Input/Output names
         const ins = session.inputNames?.length ? session.inputNames : Object.keys(session.inputMetadata||{});
         engine.inputName = ins[0];
         const outs = session.outputNames?.length ? session.outputNames : Object.keys(session.outputMetadata||{});
         engine.outputName = outs[0];
 
-        // Dummy warmup
+        // Warm up
         const dummy = new Float32Array(1*3*DEPTH_SIZE*DEPTH_SIZE);
         const t = new ort.Tensor('float32', dummy, [1,3,DEPTH_SIZE,DEPTH_SIZE]);
         const feeds={}; feeds[engine.inputName]=t;
@@ -206,9 +211,9 @@
         engineStatus();
         status('ready');
       }catch(e){
-        // Model failed → keep stereo via parallax fallback
+        // Fallback: parallax only
         engine.downloading=false; engine.ready=false; engine.warm=false;
-        loaderText.textContent='Model failed (fallback stereo available)';
+        loaderText.textContent='Model failed (fallback stereo)';
         engineState.textContent='failed'; engineState.className='bad';
         playToggle.setAttribute('aria-disabled','false');
         enterVR.setAttribute('aria-disabled','false');
@@ -218,16 +223,66 @@
       }
     }
 
-    // -------------------- Depth pipeline --------------------
-    function preprocessToMidasRGB(img){
-      // Draw to 256x256, get ImageData, convert to float32 NCHW RGB normalized (0..1)
+    // -------------------- Cache + fetch with progress --------------------
+    async function getModelArrayBufferWithCache(url, onProgress){
+      const cache = ('caches' in window) ? await caches.open(MODEL_CACHE) : null;
+
+      // Try cache first
+      if (cache){
+        const hit = await cache.match(MODEL_KEY);
+        if (hit){
+          const buf = await hit.arrayBuffer();
+          updateProgress(1);
+          return buf;
+        }
+      }
+
+      // Fetch with progress
+      const res = await fetch(url, { cache:'reload' });
+      if (!res.ok) throw new Error('HTTP '+res.status);
+      const total = Number(res.headers.get('Content-Length')) || 0;
+      const reader = res.body.getReader();
+      let received = 0; const chunks=[];
+      while(true){
+        const {done,value} = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.byteLength;
+        if (total) onProgress(received/total);
+      }
+      const blob = new Blob(chunks);
+      const arrBuf = await blob.arrayBuffer();
+
+      // Put into cache for next visits
+      if (cache){
+        const resp = new Response(blob, { headers:{ 'Content-Type':'application/octet-stream', 'Content-Length': String(blob.size) } });
+        await cache.put(MODEL_KEY, resp);
+      }
+      return arrBuf;
+    }
+
+    function showLoader(show){ loader.style.display = show ? 'block' : 'none'; }
+    function updateProgress(ratio){
+      const pct = Math.max(0, Math.min(100, Math.floor(ratio*100)));
+      fill.style.width = pct + '%';
+      loaderText.textContent = (pct<100) ? `Downloading model… ${pct}%` : 'Model downloaded';
+    }
+
+    // -------------------- Depth pipeline (MiDaS-small) --------------------
+    // ImageNet mean/std
+    const MEAN = [0.485, 0.456, 0.406];
+    const STD  = [0.229, 0.224, 0.225];
+
+    function preprocessToMidas(img){
+      // Resize to 256x256, RGB → NCHW float32 normalized by ImageNet
       workCtx.drawImage(img, 0, 0, DEPTH_SIZE, DEPTH_SIZE);
       const d = workCtx.getImageData(0,0,DEPTH_SIZE,DEPTH_SIZE).data;
       const out = new Float32Array(1*3*DEPTH_SIZE*DEPTH_SIZE);
       let i=0, rOff=0, gOff=DEPTH_SIZE*DEPTH_SIZE, bOff=2*DEPTH_SIZE*DEPTH_SIZE;
       for (let y=0; y<DEPTH_SIZE; y++){
         for (let x=0; x<DEPTH_SIZE; x++, i+=4){
-          const r=d[i]/255, g=d[i+1]/255, b=d[i+2]/255;
+          let r=d[i]/255, g=d[i+1]/255, b=d[i+2]/255;
+          r=(r-MEAN[0])/STD[0]; g=(g-MEAN[1])/STD[1]; b=(b-MEAN[2])/STD[2];
           const idx = y*DEPTH_SIZE + x;
           out[rOff+idx]=r; out[gOff+idx]=g; out[bOff+idx]=b;
         }
@@ -241,12 +296,13 @@
       engine.lastDepthTime = nowMs;
 
       try{
-        const tensorData = preprocessToMidasRGB(video);
+        const tensorData = preprocessToMidas(video);
         const input = new ort.Tensor('float32', tensorData, [1,3,DEPTH_SIZE,DEPTH_SIZE]);
         const feeds = {}; feeds[engine.inputName]=input;
         const out = await engine.ortSession.run(feeds);
         const first = engine.outputName ? out[engine.outputName] : Object.values(out)[0];
-        // Normalize depth to 0..1 (MiDaS is inverse depth-ish; we scale robustly)
+
+        // Normalize to 0..1 (robust)
         const arr = first.data;
         let min=Infinity, max=-Infinity;
         for (let i=0;i<arr.length;i++){ const v=arr[i]; if (v<min) min=v; if (v>max) max=v; }
@@ -280,11 +336,10 @@
     const depthShader = {
       uniforms: {
         map: { value: null },          // video
-        depthMap: { value: null },     // depth (R8)
-        disparity: { value: DEPTH_DISPARITY }, // strong for now
+        depthMap: { value: null },     // depth R8
+        disparity: { value: DEPTH_DISPARITY },
         eyeSign: { value: -1.0 },      // -1 left, +1 right
-        videoAspect: { value: 16/9 },
-        depthAspect: { value: 1.0 }
+        videoAspect: { value: 16/9 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -300,20 +355,16 @@
         uniform float disparity;
         uniform float eyeSign;
         uniform float videoAspect;
-        uniform float depthAspect;
         varying vec2 vUv;
 
-        // Remap vUv from video aspect to square depth map, sample depth, then offset UV in X
+        // Map video UV to square depth UV (letterbox)
         vec2 toDepthUV(vec2 uv){
-          // letterbox video to square
           float va = videoAspect;
           vec2 centered = uv;
           if (va > 1.0){
-            // video wider than tall → vertical bars in depth space
             float pad = (1.0 - 1.0/va)*0.5;
             centered.x = pad + uv.x*(1.0-2.0*pad);
           }else{
-            // video taller → horizontal bars
             float pad = (1.0 - va)*0.5;
             centered.y = pad + uv.y*(1.0-2.0*pad);
           }
@@ -323,13 +374,10 @@
         void main(){
           vec2 dUV = toDepthUV(vUv);
           float d = texture2D(depthMap, dUV).r;     // 0..1
-          // Front objects (bigger d) shift more; push opposite per eye
+          // Push opposite direction per eye; stronger near camera
           float shift = (d - 0.5) * disparity * eyeSign;
           vec2 videoUV = vUv + vec2(shift, 0.0);
-
-          // Clamp to avoid black seams
           videoUV = clamp(videoUV, vec2(0.001,0.001), vec2(0.999,0.999));
-
           gl_FragColor = texture2D(map, videoUV);
         }
       `
@@ -344,7 +392,6 @@
       m.uniforms.eyeSign.value = eyeSign;
       m.uniforms.map.value = videoTex;
       m.uniforms.depthMap.value = depthTex;
-      // Update aspects
       const va = (video.videoWidth||16) / Math.max(1, (video.videoHeight||9));
       m.uniforms.videoAspect.value = va;
       return m;
@@ -376,32 +423,31 @@
 
       const baseGeom = monoPlane.geometry.clone();
 
-      // If we have depth texture + session, build shader materials, else fallback
       if (engine.mode === 'depth' && depthTex){
         matLeft  = makeDepthMat(-1.0);
         matRight = makeDepthMat(+1.0);
       } else {
+        // fallback parallax materials
         matLeft  = new THREE.MeshBasicMaterial({ map: videoTex });
         matRight = new THREE.MeshBasicMaterial({ map: videoTex });
       }
 
       stereo.left  = new THREE.Mesh(baseGeom.clone(), matLeft);
       stereo.right = new THREE.Mesh(baseGeom.clone(), matRight);
-
       stereo.left.position.copy(monoPlane.position);
       stereo.right.position.copy(monoPlane.position);
-
       stereo.left.layers.set(1);
       stereo.right.layers.set(2);
 
       const s = 1.01; stereo.left.scale.set(s,s,1); stereo.right.scale.set(s,s,1);
       scene.add(stereo.left); scene.add(stereo.right);
 
-      // If no depth, apply visible fallback shift; with depth, planes overlap (no offset here).
       if (engine.mode === 'depth'){
+        // planes overlap; disparity comes from shader
         stereo.left.position.x  = monoPlane.position.x;
         stereo.right.position.x = monoPlane.position.x;
       } else {
+        // visible fallback
         stereo.left.position.x  = monoPlane.position.x - (PARALLAX_FALLBACK/2);
         stereo.right.position.x = monoPlane.position.x + (PARALLAX_FALLBACK/2);
       }
@@ -410,31 +456,16 @@
       engineStatus();
     }
 
-    // -------------------- Loader/Status --------------------
-    function showLoader(show){ loader.style.display = show ? 'block' : 'none'; }
-    function updateProgress(ratio){
-      const pct = Math.max(0, Math.min(100, Math.floor(ratio*100)));
-      fill.style.width = pct + '%';
-      loaderText.textContent = (pct<100) ? `Downloading model… ${pct}%` : 'Model downloaded';
-    }
-    async function fetchWithProgress(url, onProgress){
-      const res = await fetch(url, { cache:'force-cache' });
-      if (!res.ok) throw new Error('HTTP '+res.status);
-      const total = Number(res.headers.get('Content-Length')) || 0;
-      const reader = res.body.getReader();
-      let received = 0; const chunks=[];
-      while(true){ const {done,value}=await reader.read(); if(done)break; chunks.push(value); received+=value.byteLength; if(total) onProgress(received/total); }
-      const blob = new Blob(chunks); return await blob.arrayBuffer();
-    }
+    // -------------------- Status helpers --------------------
     function engineStatus(){
-      // Engine chip
       if (engine.downloading && !engine.ready){ engineState.textContent='downloading…'; engineState.className='warn'; }
       else if (engine.ready && !engine.warm){ engineState.textContent='downloaded (warming…)'; engineState.className='warn'; }
       else if (engine.ready && engine.warm && !engine.active){ engineState.textContent='ready (awaiting VR)'; engineState.className='ok'; }
-      else if (engine.active){ engineState.textContent='active'; engineState.className='ok'; }
-      else { engineState.textContent='waiting'; engineState.className='warn'; }
+      else if (engine.active){
+        engineState.textContent = (engine.mode==='depth') ? 'active (depth)' : 'active (parallax)';
+        engineState.className='ok';
+      } else { engineState.textContent='waiting'; engineState.className='warn'; }
 
-      // Mode chip
       let modeText = '2D (mono)';
       if (engine.active){
         if (engine.mode==='depth') modeText = '3D (depth)';
@@ -463,7 +494,6 @@
         }
         bindVideoTexture();
 
-        // Build stereo using depth if available, else parallax
         buildStereoPlanes();
 
         xrSession.addEventListener('end', ()=>{
@@ -479,12 +509,13 @@
         status('VR failed'); log('requestSession error: ' + (e?.message||e));
       }
     }
+
     async function probeXR(){
       const xrOK = !!navigator.xr;
       let supported = false;
       try { supported = xrOK ? await navigator.xr.isSessionSupported('immersive-vr') : false; }
       catch(e) {}
-      // Enabled after model flow; Start Session turns these on
+      // Enabled after Start Session; showing here if supported
       enterVR.setAttribute('aria-disabled', (!supported) ? 'true':'false');
     }
 
@@ -518,11 +549,10 @@
     }
 
     function animate(){
-      renderer.setAnimationLoop((t)=>{
-        // Update video texture
+      renderer.setAnimationLoop(()=>{
         if (videoTex && !video.paused && !video.ended) videoTex.needsUpdate = true;
 
-        // Depth updates (even outside VR, so we’re ready on entry)
+        // Depth updates in 2D and VR
         computeDepthIfDue(performance.now());
 
         // Keep shader uniforms fresh
