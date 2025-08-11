@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>WebXR 2D→3D POC — v0.24 (Depth On-Device)</title>
+  <title>WebXR 2D→3D POC — v0.25 (Depth On-Device)</title>
   <style>
     html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
     video{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px}
@@ -30,21 +30,23 @@
     #diag{position:fixed;left:12px;bottom:12px;color:#aaa;font-size:12px;white-space:pre-line;z-index:9;max-width:92vw}
   </style>
 
-  <!-- ONNX Runtime from your repo -->
+  <!-- 3. Lock ONNX Runtime to single-threaded WASM (SIMD on) -->
   <script src="./ort/ort.min.js"></script>
   <script>
-    // Point ORT to your local wasm, enable SIMD & threads
     if (window.ort && ort.env && ort.env.wasm) {
+      // Serve the WASM blobs from your repo’s /ort/ folder
       ort.env.wasm.wasmPaths = "./ort/";
+      // SIMD helps performance and is safe to keep on
       ort.env.wasm.simd = true;
-      ort.env.wasm.numThreads = Math.max(2, (navigator.hardwareConcurrency||4)-1);
+      // Force single-thread so it runs everywhere (no jsep warning, no COOP/COEP requirement)
+      ort.env.wasm.numThreads = 1;
     }
   </script>
 </head>
 <body>
   <!-- HUD -->
   <div id="hud">
-    <span class="pill">Build v0.24</span>
+    <span class="pill">Build v0.25</span>
     <span id="enterVR" class="pill btn-pill" aria-disabled="true">Enter VR</span>
     <span id="playToggle" class="pill btn-pill" aria-disabled="true">Play</span>
     <span id="status" class="pill">idle</span>
@@ -77,7 +79,7 @@
 
     // -------------------- Config --------------------
     const STREAM_URL  = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-    const MODEL_URL   = './models/model-small.onnx?v=0.24';
+    const MODEL_URL   = './models/model-small.onnx?v=0.25';
     const DEPTH_SIZE  = 256;          // MiDaS small expects 256
     const DEPTH_FPS   = 10;           // throttle depth
     const DEPTH_DISPARITY = 0.10;     // visual depth strength
